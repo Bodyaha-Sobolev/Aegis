@@ -1,4 +1,4 @@
-use aegis_lang::{codec, pe, project, storage};
+use aegis_lang::{codec, disasm, pe, project, storage};
 use std::{
     ffi::OsString,
     io::Write,
@@ -13,14 +13,42 @@ fn main() {
     }
 }
 fn usage() -> String {
-    concat!("AEGIS ", env!("CARGO_PKG_VERSION"), "\n  aegis-cli build <source.ae|source.aeg> [out.exe] [-k keyfile -c dialect]\n  aegis-cli check <source.ae>\n  aegis-cli inspect <file.exe|file.dll|file.sys>\n  aegis-cli enc <source.ae> <out.aeg> -k keyfile -c dialect\n  aegis-cli dec <source.aeg> <out.ae> -k keyfile -c dialect\n  aegis-cli keygen <new-key-file>\n  dialect: decimal or 0x000..0xFFF").into()
+    concat!("AEGIS ", env!("CARGO_PKG_VERSION"), "\n  aegis-cli build <source.ae|source.aeg> [out.exe] [-k keyfile -c dialect]\n  aegis-cli check <source.ae>\n  aegis-cli inspect <file.exe|file.dll|file.sys>\n  aegis-cli disasm <PE-file> [RVA] [instruction-count]\n  aegis-cli enc <source.ae> <out.aeg> -k keyfile -c dialect\n  aegis-cli dec <source.aeg> <out.ae> -k keyfile -c dialect\n  aegis-cli keygen <new-key-file>\n  dialect: decimal or 0x000..0xFFF").into()
 }
 fn execute(args: Vec<OsString>) -> Result<(), String> {
+    if args.len() == 1 && args[0] == "--licenses" {
+        print!("{}", aegis_lang::THIRD_PARTY_NOTICES);
+        return Ok(());
+    }
     if args.is_empty() || args[0] == "--help" || args[0] == "help" {
         println!("{}", usage());
         return Ok(());
     }
     let command = args[0].to_str().ok_or_else(usage)?;
+    if command == "disasm" {
+        if !(2..=4).contains(&args.len()) {
+            return Err(usage());
+        }
+        let bytes =
+            storage::read_bounded(Path::new(&args[1]), pe::MAX_FILE).map_err(|e| e.to_string())?;
+        let image = pe::inspect(&bytes).map_err(|e| e.to_string())?;
+        let rva = match args.get(2) {
+            Some(text) => {
+                disasm::parse_rva(text.to_str().ok_or_else(usage)?).map_err(|e| e.to_string())?
+            }
+            None => image.entry_rva,
+        };
+        let count = match args.get(3) {
+            Some(text) => text
+                .to_str()
+                .and_then(|s| s.parse::<usize>().ok())
+                .ok_or_else(usage)?,
+            None => 128,
+        };
+        let page = disasm::pe_page(&image, &bytes, rva, count).map_err(|e| e.to_string())?;
+        print!("{page}");
+        return Ok(());
+    }
     let mut paths = Vec::new();
     let mut key_path = None;
     let mut dialect = None;

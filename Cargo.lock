@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-cli"
-version = "0.2.10-alpha.1"
+version = "0.2.11-alpha.1"
 dependencies = [
  "aegis-lang",
  "zeroize",
@@ -44,17 +44,18 @@ dependencies = [
 
 [[package]]
 name = "aegis-lang"
-version = "0.2.10-alpha.1"
+version = "0.2.11-alpha.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
+ "iced-x86",
  "tempfile",
  "zeroize",
 ]
 
 [[package]]
 name = "aegis-studio"
-version = "0.2.10-alpha.1"
+version = "0.2.11-alpha.1"
 dependencies = [
  "aegis-lang",
  "eframe",
@@ -1040,6 +1041,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
+name = "iced-x86"
+version = "1.21.0"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1260,6 +1268,12 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "lazy_static"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"

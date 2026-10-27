@@ -3,6 +3,7 @@
 
 pub mod codec;
 mod codegen;
+pub mod disasm;
 mod lexer;
 mod parser;
 pub mod pe;
@@ -16,6 +17,7 @@ pub use parser::{FunctionInfo, analyze};
 use std::{fmt, ops::Range};
 
 pub const MAX_SOURCE: usize = 1024 * 1024;
+pub const THIRD_PARTY_NOTICES: &str = include_str!("../../../THIRD_PARTY_NOTICES.txt");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {

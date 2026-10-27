@@ -5,7 +5,9 @@ set "AEGIS_PYTHON=py"
 where py >nul 2>nul
 if errorlevel 1 set "AEGIS_PYTHON=python"
 if /I "%~1"=="test" (
-    cargo fmt --all -- --check
+    %AEGIS_PYTHON% tools\verify_vendor.py
+    if errorlevel 1 goto failed
+    cargo fmt --package aegis-lang --package aegis-cli --package aegis-studio -- --check
     if errorlevel 1 goto failed
     cargo clippy --locked --workspace --all-targets -- -D warnings
     if errorlevel 1 goto failed

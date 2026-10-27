@@ -556,3 +556,29 @@ Exports, фильтр по имени/DLL/ordinal/RVA/forwarder и перехо�
 снимка. Имена обрезаются по ширине строки, полный текст доступен при наведении.
 Фильтр кэшируется до изменения запроса. Для визуальной проверки вкладки доступен
 `aegis.exe --smoke-inspect screenshot.png fixture.dll exports`.
+
+### Линейное дизассемблирование x86/x64
+
+Модуль disasm — собственный адаптер над временно vendored iced-x86 1.21.0,
+features std/decoder/intel; кодирование/assembler выключены. Реализация декодера
+не объявляется собственной. Версия и архив SHA256 закреплены в third_party,
+исходные .rs не менялись. Изменён только manifest для двух compatibility lints.
+Собственные crate сохраняют forbid(unsafe_code); это не запрет unsafe внутри
+сторонней библиотеки и не доказательство её полной безопасности.
+
+API decode(bytes,bits,address,limit) принимает 32/64 bit, до 65536 байт,
+1..4096 инструкций, возвращает Row с VA, offset, bytes, Intel text, invalid
+и direct branch target. Проверяются продвижение декодера и переполнение адреса.
+Page для PE использует уникальный raw range и совпадающий по размеру снимок,
+вычисляет VA=ImageBase+RVA, next_rva и file offset. Machine должен быть x86/x64.
+Метаданные Image и bytes должны относиться к одному снимку, как в CLI/IDE;
+проверка размера сама по себе не проверяет тождество произвольных буферов.
+
+CLI: disasm PE [RVA] [count], по умолчанию entry/128 инструкций. RVA decimal
+или 0x hex, неправильный RVA/count/architecture — диагностический exit 2.
+Неполные/неверные инструкции показаны с [invalid], не выдаются за достоверный код.
+IDE кеширует страницу по запросу, 128 инструкций, bounded history до 128 RVA,
+Go/Entry/Back/Next, Follow для прямых ветвей с raw mapping, переход к байтам
+того же снимка. В Exports кнопка Disasm не предлагается для forwarder/BSS.
+Smoke: --smoke-inspect PNG PE disasm. Данные не загружаются и не исполняются.
+Нет анализа CFG/типов, восстановления функций, декомпиляции и live-debugger.

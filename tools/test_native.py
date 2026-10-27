@@ -295,6 +295,9 @@ def main():
     ])
     with tempfile.TemporaryDirectory(prefix='aegis-tests-') as folder:
         folder = Path(folder)
+        notices=run(COMPILER,'--licenses')
+        assert notices.returncode==0 and b'iced project and contributors' in notices.stdout and b'lazy_static' in notices.stdout
+        print('PASS embedded third-party notices')
         for name, source, expected, code in cases:
             src, exe = folder / (name+'.ae'), folder / (name+'.exe')
             src.write_text(source, encoding='utf-8')
@@ -385,6 +388,14 @@ def main():
         assert report.returncode == 0 and all(s in report.stdout for s in [b'PE64 x64',b'.rdata',b'.reloc',b'KERNEL32.DLL',b'WriteFile',b'NX-compatible=true',b'DynamicBase=true',b'HighEntropyVA=true']), (report.stdout,report.stderr)
         assert inspected.read_bytes() == before
         print('PASS read-only PE inspection')
+        listing=run(COMPILER,'disasm',inspected)
+        assert listing.returncode==0 and b'Linear disassembly' in listing.stdout and b'file 00000400' in listing.stdout,(listing.stdout,listing.stderr)
+        assert inspected.read_bytes()==before
+        print('PASS read-only disassembly of generated code')
+        for arguments,expected in [(('0x1000','0'),b'limit exceeded'),(('0x100000000',),b'RVA must')]:
+            result=run(COMPILER,'disasm',inspected,*arguments)
+            assert result.returncode==2 and expected in result.stderr and not result.stdout
+            print('PASS reject disassembly arguments',arguments)
         damaged = folder/'invalid-pe.bin'
         damaged.write_bytes(b'MZ'+b'\xff'*70)
         report = run(COMPILER,'inspect',damaged)
@@ -400,6 +411,23 @@ def main():
                 assert expected in report.stdout, (bits, expected, report.stdout)
             assert exported.read_bytes() == fixture
             print('PASS read-only export metadata', bits)
+            listing=run(COMPILER,'disasm',exported,'0x2000','1')
+            assert listing.returncode==0 and b'ret' in listing.stdout and b'file 00000C00' in listing.stdout,(listing.stdout,listing.stderr)
+            assert exported.read_bytes()==fixture
+            print('PASS fixture disassembly',bits)
+            if bits==64:
+                unsupported=bytearray(fixture);unsupported[0x84:0x86]=(0xaa64).to_bytes(2,'little')
+                exported.write_bytes(unsupported)
+                result=run(COMPILER,'disasm',exported,'0x2000','1')
+                assert result.returncode==2 and b'PE machine must' in result.stderr and not result.stdout
+                print('PASS non-x86 PE disassembly rejected')
+                truncated=bytearray(fixture);truncated[0xc00]=0x0f
+                truncated[0x188+40+8:0x188+40+12]=(1).to_bytes(4,'little')
+                truncated[0x188+40+16:0x188+40+20]=(1).to_bytes(4,'little')
+                exported.write_bytes(truncated)
+                result=run(COMPILER,'disasm',exported,'0x2000','1')
+                assert result.returncode==0 and b'[invalid]' in result.stdout,(result.stdout,result.stderr)
+                print('PASS truncated instruction visibly marked')
             fixture[0x544:0x546] = (5).to_bytes(2, 'little')
             exported.write_bytes(fixture)
             report = run(COMPILER, 'inspect', exported)
@@ -460,7 +488,7 @@ def main():
             result = run(COMPILER, *args)
             assert result.returncode == 2, (args, result.stdout, result.returncode)
         print('PASS invalid CLI commands and dialects')
-    print(f'{len(cases) + len(errors) + 30} checks passed')
+    print(f'{len(cases) + len(errors) + 38} checks passed')
 
 
 if __name__ == '__main__':

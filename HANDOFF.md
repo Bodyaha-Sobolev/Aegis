@@ -2,11 +2,11 @@
 
 Состояние на 27 октября 2026. Основной проект теперь на **Rust**.
 Сначала прочитать README, LANGUAGE и VISION; затем запускать проверки.
-Версия: 0.2.10-alpha.1. Язык и IDE получили файловые модули, импорты и source map,
+Версия: 0.2.11-alpha.1. Язык и IDE получили файловые модули, импорты и source map,
 проверяемые инициализаторы и копирование по значению, включая параметры функций.
 IDE использует тот же компилятор и показывает имена структур в сигнатурах.
 Инспектор EXE/DLL/SYS показывает PE-заголовки, секции, импорты и страницы байтов.
-Проверены 72 Rust-теста и 222 native/CLI-проверки; ограничения описаны ниже.
+Проверены 77 Rust-тестов и 230 native/CLI-проверок; ограничения описаны ниже.
 Последнее уточнение владельца: безопасность, облегчение реверс-инжиниринга,
 работа с драйверами/памятью, GPU-эффекты и шейдеры для интерфейсов. Полные
 приоритеты зафиксированы в VISION.md; после строк приоритет системной модели
@@ -17,7 +17,9 @@ IDE использует тот же компилятор и показывае�
 Дополнение владельца: самостоятельно развивать цель, изучать сильные стороны
 Python/C/C++/Java/C#/Go/JavaScript/TypeScript/Rust и популярных IDE, проверять
 улучшения по безопасности, удобству и измеряемой производительности. Последнее
-уточнение — не копировать чужие исходники: изучать идеи и писать свою реализацию.
+прежнее уточнение — не копировать чужие исходники. Последнее решение после
+0.2.10 разрешает временные открытые компоненты с исходниками и последующей
+заменой; происхождение и обязательные лицензии сохраняются.
 Полные требования и исследовательские ориентиры сохранены в VISION.md.
 
 Последнее расширение владельца: ориентир превосходства над Java/Go/C#/Python/C/C++,
@@ -168,11 +170,11 @@ AEG0 из прототипа несовместим с AEGIS02: сначала �
 
 ## Проверено в этой итерации
 
-- `cargo fmt --all -- --check`.
+- `cargo fmt --package aegis-lang --package aegis-cli --package aegis-studio -- --check`.
 - `cargo clippy --locked --workspace --all-targets -- -D warnings`.
-- `cargo test --locked --workspace`: 72 теста, включая 2000 ошибочных входов,
+- `cargo test --locked --workspace`: 77 тестов, включая 2000 ошибочных входов,
   пределы глубины/длины AST, воспроизводимость, контейнер, UI-state и runner.
-- `tools/test_native.py`: 222 проверки с реальным запуском EXE, включая
+- `tools/test_native.py`: 230 проверок с реальным запуском EXE, включая
   660 результатов побитовых операций по независимому Python-расчёту,
   вызовы с 32 аргументами, вложенные вызовы, рекурсию на 5000 уровней,
   300 последовательных блоков и отказ при превышении числа живых слотов,
@@ -508,3 +510,35 @@ ordinal-only, target/forwarder, безопасный переход Bytes с п�
 до конца возвращаемого диапазона, а не только в первой точке. Чтение таблицы
 или строки останавливается перед началом перекрывающей секции. Регрессия:
 EAT начинается до overlap, но пересекает его; такой образ отвергается.
+
+### Временное ядро дизассемблера (0.2.11-alpha.1)
+
+Последнее уточнение владельца разрешает временно брать готовые открытые исходники
+с последующей заменой. Прежний запрет копирования уточнён этим решением; нельзя
+скрывать происхождение/обязательные лицензии. В third_party/iced-x86 скопирован
+проверенный crates.io package 1.21.0, archive SHA256 и commit в third_party/README.
+142 исходных файла + LICENSE.txt, 143 hashes в iced-x86.sha256. .rs не менялись,
+в Cargo.toml добавлены allow unexpected_cfgs/unused_attributes для Rust 1.96.
+MIT notices и MIT option lazy_static 1.5.1 в THIRD_PARTY_NOTICES.txt, embedded в
+CLI --licenses и File → Component licenses; не показываются автоматически.
+
+iced-x86 excluded из workspace, path dependency aegis-lang, features std/decoder/
+intel. Cargo.lock добавляет iced-x86 и lazy_static. build.cmd test сначала запускает
+verify_vendor.py, затем fmt только трёх own packages; cargo fmt --all пытается
+обойти upstream test modules, которых нет в опубликованном crate. Остальные
+clippy/unit/native/release проверки сохранены. Не переформатировать vendor .rs
+и не выдавать его за свою реализацию. При осознанном изменении обновлять origin/diff
+и checksum manifest, без отключения проверки.
+
+Общий disasm API ограничивает bytes/instructions/text, проверяет address overflow,
+сохраняет offset/bytes/invalid/direct target. PE mapping уникальный, общий снимок
+CLI/IDE; архитектура ARM не интерпретируется как x86. CLI disasm, Studio Panel
+в отдельном disassembly.rs: cached 128 instructions, history<=128, Go/Entry/Back/
+Next/Follow, export-to-disasm и instruction-to-bytes. Библиотека изолирована за
+адаптером, поэтому последующая собственная реализация сохраняет public API/tests.
+
+Добавлены четыре Rust-теста disasm (x86/x64/branch/truncation, mapping/arch/snapshot,
+budgets/overflow/RVA, 4000 random/prefix-heavy cases), один UI-state/headless test.
+CLI ещё 8 проверок: embedded notices, generated PE, x86/x64 fixtures, bad RVA/count,
+unsupported arch, invalid instruction. Всего 77 Rust-тестов и 230 native/CLI.
+Нет CFG/decompiler/live debugger, декодирование линейное и не распознаёт код/данные.

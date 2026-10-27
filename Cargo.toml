@@ -1,9 +1,10 @@
 [workspace]
 members = ["crates/aegis-lang", "crates/aegis-cli", "crates/aegis-studio"]
+exclude = ["third_party/iced-x86"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.10-alpha.1"
+version = "0.2.11-alpha.1"
 edition = "2024"
 rust-version = "1.96"
 

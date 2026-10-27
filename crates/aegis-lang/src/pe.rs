@@ -263,6 +263,11 @@ fn add_rva(rva: u32, delta: usize) -> Result<u32> {
         .ok_or_else(|| Error("RVA overflow".into()))
 }
 impl Image {
+    /// Returns the unique contiguous file-backed range at an RVA, stopping
+    /// before any later overlapping section. Does not map/load an OS image.
+    pub fn file_range(&self, rva: u32) -> Result<Range<usize>> {
+        self.mapped_range(rva)
+    }
     fn mapped_range(&self, rva: u32) -> Result<Range<usize>> {
         let mut result = if rva < self.headers_size {
             Some(rva as usize..self.headers_size as usize)

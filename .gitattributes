@@ -1,2 +1,5 @@
 * text=auto eol=lf
 *.cmd text eol=crlf
+
+# Preserve upstream original manifest whitespace; vendor hashes verify its bytes.
+third_party/iced-x86/Cargo.toml.orig -whitespace

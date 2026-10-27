@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
+mod disassembly;
 mod document;
 mod editor_project;
 mod highlighting;
@@ -100,6 +101,8 @@ struct Studio {
     navigation_selected: usize,
     smoke_frames: Option<u32>,
     smoke_exports: bool,
+    smoke_disasm: bool,
+    licenses_open: bool,
     screenshot: Option<PathBuf>,
     inspector: Option<inspector::Inspector>,
     inspecting: bool,
@@ -140,6 +143,8 @@ impl Default for Studio {
             navigation_selected: 0,
             smoke_frames: None,
             smoke_exports: false,
+            smoke_disasm: false,
+            licenses_open: false,
             screenshot: None,
             inspector: None,
             inspecting: false,
@@ -176,6 +181,7 @@ impl Studio {
             if let Some(path) = args.get(2) {
                 if args[0] == "--smoke-inspect" {
                     app.smoke_exports = args.get(3).is_some_and(|s| s == "exports");
+                    app.smoke_disasm = args.get(3).is_some_and(|s| s == "disasm");
                     app.inspect_binary(PathBuf::from(path), cc.egui_ctx.clone());
                 } else {
                     app.open_path(PathBuf::from(path));
@@ -450,6 +456,9 @@ impl Studio {
                             let mut inspector = inspector::Inspector::new(path, image, bytes);
                             if self.smoke_exports {
                                 inspector.select_exports();
+                            }
+                            if self.smoke_disasm {
+                                inspector.select_disassembly();
                             }
                             self.inspector = Some(inspector);
                             self.status = "Binary inspected · file not executed".into();
@@ -789,6 +798,10 @@ impl Studio {
                         self.save(id, false, false);
                     }
                     ui.menu_button("File", |ui| {
+                        if ui.button("Component licenses").clicked() {
+                            self.licenses_open = true;
+                            ui.close();
+                        }
                         if ui
                             .add_enabled(
                                 !self.inspecting,
@@ -1412,6 +1425,16 @@ impl Studio {
 impl eframe::App for Studio {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.show(ctx);
+        if self.licenses_open {
+            egui::Window::new("Component licenses")
+                .open(&mut self.licenses_open)
+                .default_size([650.0, 450.0])
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label(aegis_lang::THIRD_PARTY_NOTICES);
+                    });
+                });
+        }
     }
 }
 impl Drop for Studio {

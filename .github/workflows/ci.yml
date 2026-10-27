@@ -40,4 +40,5 @@ jobs:
           path: |
             aegis.exe
             aegis-cli.exe
+            THIRD_PARTY_NOTICES.txt
           if-no-files-found: error

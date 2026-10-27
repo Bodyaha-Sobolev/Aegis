@@ -1,3 +1,4 @@
+use crate::disassembly;
 use aegis_lang::pe;
 use eframe::egui::{self, Color32, RichText};
 use std::path::PathBuf;
@@ -11,9 +12,11 @@ pub struct Inspector {
     offset: usize,
     export_query: Option<String>,
     export_rows: Vec<(usize, Option<usize>)>,
+    disassembly: disassembly::Panel,
 }
 impl Inspector {
     pub fn new(path: PathBuf, image: pe::Image, bytes: Vec<u8>) -> Self {
+        let disassembly = disassembly::Panel::new(image.entry_rva);
         Self {
             path,
             image,
@@ -23,10 +26,14 @@ impl Inspector {
             offset: 0,
             export_query: None,
             export_rows: Vec::new(),
+            disassembly,
         }
     }
     pub fn select_exports(&mut self) {
         self.selected = 4;
+    }
+    pub fn select_disassembly(&mut self) {
+        self.selected = 5;
     }
     fn jump_to_bytes(&mut self, offset: usize) {
         if offset < self.bytes.len() {
@@ -90,6 +97,7 @@ impl Inspector {
         }
         let height = ui.text_style_height(&egui::TextStyle::Monospace).max(22.0);
         let mut jump = None;
+        let mut code_jump = None;
         egui::ScrollArea::both().id_salt("pe-exports").show_rows(
             ui,
             height,
@@ -119,12 +127,22 @@ impl Inspector {
                         } else {
                             ui.label("No unique file mapping");
                         }
+                        if export.forwarder.is_none()
+                            && export.file_offset.is_some()
+                            && ui.small_button("Disasm").clicked()
+                        {
+                            code_jump = Some(export.rva);
+                        }
                     });
                 }
             },
         );
         if let Some(offset) = jump {
             self.jump_to_bytes(offset);
+        }
+        if let Some(rva) = code_jump {
+            self.disassembly.goto(rva, &self.image, &self.bytes);
+            self.select_disassembly();
         }
     }
     fn show_bytes(&mut self, ui: &mut egui::Ui) {
@@ -181,7 +199,7 @@ impl Inspector {
                 ui.label(RichText::new(self.path.display().to_string()).strong());
                 ui.label("Read-only file analysis · input was not executed · header flags are not a safety verdict");
                 ui.horizontal(|ui| {
-                    for (index, label) in [(0,"Headers"), (1,"Sections"), (2,"Imports"), (4,"Exports"), (3,"Bytes")] {
+                    for (index, label) in [(0,"Headers"), (1,"Sections"), (2,"Imports"), (4,"Exports"), (5,"Disassembly"), (3,"Bytes")] {
                         ui.selectable_value(&mut self.selected, index, label);
                     }
                     if ui.button("Copy report").clicked() { ui.ctx().copy_text(self.image.to_string()); }
@@ -216,6 +234,7 @@ impl Inspector {
                     }).inner,
                     3 => self.show_bytes(ui),
                     4 => self.show_exports(ui),
+                    5 => {if let Some(offset)=self.disassembly.show(ui,&self.image,&self.bytes) {self.jump_to_bytes(offset);}},
                     _ => {
                         ui.horizontal(|ui| { ui.label("Filter"); ui.text_edit_singleline(&mut self.filter); });
                         let query = self.filter.to_lowercase();
@@ -274,7 +293,7 @@ mod tests {
         let image = pe::inspect(&bytes).expect("PE");
         let mut inspector = Inspector::new(PathBuf::from("sample.exe"), image, bytes);
         let ctx = egui::Context::default();
-        for selected in 0..5 {
+        for selected in 0..6 {
             inspector.selected = selected;
             inspector.filter = "write".into();
             let output = ctx.run(egui::RawInput::default(), |ctx| {
