@@ -2,7 +2,11 @@ use crate::{
     Diagnostic,
     lexer::{self, Keyword, Kind, Token},
 };
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Type {
@@ -196,6 +200,10 @@ pub(crate) fn parse(source: &str, tokens: Vec<Token>) -> Result<Program, Diagnos
         records: HashMap::new(),
         pending_records: HashMap::new(),
         resolving_records: Vec::new(),
+        module: String::new(),
+        items: Vec::new(),
+        modules: HashSet::new(),
+        function_names: HashSet::new(),
     }
     .program()?;
     crate::semantics::check(source, &mut program)?;
@@ -207,8 +215,20 @@ struct Parser<'a> {
     at: usize,
     depth: usize,
     records: HashMap<String, Arc<Record>>,
-    pending_records: HashMap<String, usize>,
+    pending_records: HashMap<String, (usize, String)>,
     resolving_records: Vec<String>,
+    module: String,
+    items: Vec<Item>,
+    modules: HashSet<String>,
+    function_names: HashSet<String>,
+}
+#[derive(Clone)]
+struct Item {
+    kind: Keyword,
+    start: usize,
+    end: usize,
+    name: String,
+    module: String,
 }
 impl Parser<'_> {
     fn token(&self) -> &Token {
@@ -248,6 +268,57 @@ impl Parser<'_> {
         self.at += 1;
         Ok(name)
     }
+    fn qualify(&self, name: &str) -> String {
+        if self.module.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{}::{name}", self.module)
+        }
+    }
+    fn path(&mut self) -> Result<String, Diagnostic> {
+        let absolute = self.sym("::");
+        let mut name = self.name()?;
+        let mut count = 1;
+        while self.sym("::") {
+            count += 1;
+            if count > 17 {
+                return Err(self.error("path limit exceeded (17 components)"));
+            }
+            name.push_str("::");
+            name.push_str(&self.name()?);
+        }
+        if absolute {
+            name.insert_str(0, "::");
+        }
+        Ok(name)
+    }
+    fn lookup(&self, name: &str, record: bool) -> Option<String> {
+        let exists = |candidate: &str| {
+            if record {
+                self.pending_records.contains_key(candidate)
+            } else {
+                self.function_names.contains(candidate)
+            }
+        };
+        if let Some(root) = name.strip_prefix("::") {
+            return exists(root).then(|| root.to_owned());
+        }
+        let mut scope = self.module.as_str();
+        loop {
+            let candidate = if scope.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{scope}::{name}")
+            };
+            if exists(&candidate) {
+                return Some(candidate);
+            }
+            if scope.is_empty() {
+                return None;
+            }
+            scope = scope.rsplit_once("::").map_or("", |(parent, _)| parent);
+        }
+    }
     fn type_name(&mut self) -> Result<Type, Diagnostic> {
         self.enter()?;
         let result = self.parse_type();
@@ -266,10 +337,14 @@ impl Parser<'_> {
             return Type::array(element, len as usize)
                 .ok_or_else(|| self.error("array layout limit exceeded (256 slots or 32 levels)"));
         }
-        if self.token().kind == Kind::Ident {
-            let span = self.token().span.clone();
-            let name = self.name()?;
-            return self.resolve_record(&name, span).map(Type::Record);
+        if matches!(self.token().kind, Kind::Ident | Kind::Sym("::")) {
+            let start = self.token().span.start;
+            let name = self.path()?;
+            let span = start..self.tokens[self.at - 1].span.end;
+            let resolved = self.lookup(&name, true).ok_or_else(|| {
+                Diagnostic::new(self.source, span.clone(), format!("unknown type: {name}"))
+            })?;
+            return self.resolve_record(&resolved, span).map(Type::Record);
         }
         let ty = match self.token().kind {
             Kind::Keyword(Keyword::I64) => Type::I64,
@@ -290,7 +365,8 @@ impl Parser<'_> {
         }
     }
     fn record_definition(&mut self) -> Result<Arc<Record>, Diagnostic> {
-        let name = self.name()?;
+        let short = self.name()?;
+        let name = self.qualify(&short);
         self.expect("{")?;
         let mut fields = Vec::new();
         while !self.sym("}") {
@@ -335,7 +411,7 @@ impl Parser<'_> {
         if let Some(record) = self.records.get(name) {
             return Ok(record.clone());
         }
-        let Some(&start) = self.pending_records.get(name) else {
+        let Some((start, module)) = self.pending_records.get(name).cloned() else {
             return Err(Diagnostic::new(
                 self.source,
                 span,
@@ -358,61 +434,125 @@ impl Parser<'_> {
         }
         let saved = self.at;
         self.at = start;
+        let saved_module = std::mem::replace(&mut self.module, module);
         self.resolving_records.push(name.to_owned());
         let record = self.record_definition()?;
         self.resolving_records.pop();
         self.at = saved;
+        self.module = saved_module;
         self.records.insert(name.to_owned(), record.clone());
         Ok(record)
     }
-    // Collect declaration locations first, then resolve the bounded acyclic layouts.
-    fn collect_records(&mut self) -> Result<(), Diagnostic> {
-        let mut braces = 0usize;
-        let mut names = Vec::new();
-        while self.token().kind != Kind::Eof {
-            if braces == 0 && self.kw(Keyword::Struct) {
-                let start = self.at;
-                let name = self.name()?;
-                if self.pending_records.insert(name.clone(), start).is_some() {
-                    return Err(self.error("struct already defined"));
+    // Index all declarations before resolving any references. Scanning bodies is
+    // iterative; module recursion is separately bounded and never reads files.
+    fn collect_items(&mut self, nested: bool, depth: usize) -> Result<(), Diagnostic> {
+        loop {
+            if self.token().kind == Kind::Eof {
+                if nested {
+                    return Err(self.error("expected '}' before end of module"));
                 }
-                names.push(name);
-                if names.len() > 128 {
-                    return Err(self.error("struct limit exceeded (128)"));
+                return Ok(());
+            }
+            if nested && self.sym("}") {
+                return Ok(());
+            }
+            if self.kw(Keyword::Mod) {
+                if depth >= 16 {
+                    return Err(self.error("module nesting limit exceeded (16)"));
+                }
+                let short = self.name()?;
+                let name = self.qualify(&short);
+                if !self.modules.insert(name.clone()) {
+                    return Err(self.error("module already defined"));
+                }
+                if self.modules.len() > 128 {
+                    return Err(self.error("module limit exceeded (128)"));
+                }
+                if self.token().kind == Kind::Sym(";") {
+                    return Err(self.error(
+                        "external modules require a project loader; use mod name { ... } for now",
+                    ));
                 }
                 self.expect("{")?;
-                braces = 1;
+                let saved = std::mem::replace(&mut self.module, name);
+                self.collect_items(true, depth + 1)?;
+                self.module = saved;
+                continue;
+            }
+            let start = self.at;
+            let kind = if self.kw(Keyword::Fn) {
+                Keyword::Fn
+            } else if self.kw(Keyword::Struct) {
+                Keyword::Struct
             } else {
+                return Err(self.error("expected function definition, struct or mod"));
+            };
+            let name_at = self.at;
+            let short = self.name()?;
+            let name = self.qualify(&short);
+            if kind == Keyword::Struct {
+                if self
+                    .pending_records
+                    .insert(name.clone(), (name_at, self.module.clone()))
+                    .is_some()
+                {
+                    return Err(self.error("struct already defined"));
+                }
+                if self.pending_records.len() > 128 {
+                    return Err(self.error("struct limit exceeded (128)"));
+                }
+            } else {
+                if !self.function_names.insert(name.clone()) {
+                    return Err(self.error("function already defined"));
+                }
+                if self.function_names.len() > 256 {
+                    return Err(self.error("function limit exceeded"));
+                }
+                while self.token().kind != Kind::Sym("{") {
+                    if matches!(self.token().kind, Kind::Eof | Kind::Sym("}")) {
+                        return Err(self.error("expected '{' for function body"));
+                    }
+                    self.at += 1;
+                }
+            }
+            self.expect("{")?;
+            let mut braces = 1usize;
+            while braces != 0 {
                 match self.token().kind {
+                    Kind::Eof => return Err(self.error("expected '}' before end of file")),
                     Kind::Sym("{") => braces += 1,
-                    Kind::Sym("}") => braces = braces.saturating_sub(1),
+                    Kind::Sym("}") => braces -= 1,
                     _ => {}
                 }
                 self.at += 1;
             }
+            self.items.push(Item {
+                kind,
+                start,
+                end: self.at,
+                name,
+                module: self.module.clone(),
+            });
         }
-        for name in names {
-            self.resolve_record(&name, 0..0)?;
-        }
-        self.at = 0;
-        Ok(())
     }
     fn program(mut self) -> Result<Program, Diagnostic> {
-        self.collect_records()?;
+        self.collect_items(false, 0)?;
+        for item in self.items.clone() {
+            if item.kind == Keyword::Struct {
+                self.resolve_record(&item.name, self.tokens[item.start].span.clone())?;
+            }
+        }
         let mut functions: Vec<Function> = Vec::new();
-        while self.token().kind != Kind::Eof {
-            if self.kw(Keyword::Struct) {
-                self.record_definition()?;
+        for item in self.items.clone() {
+            if item.kind != Keyword::Fn {
                 continue;
             }
+            self.at = item.start;
+            self.module = item.module;
             let start = self.token().span.start;
-            if !self.kw(Keyword::Fn) {
-                return Err(self.error("expected function definition"));
-            }
-            let name = self.name()?;
-            if functions.iter().any(|f| f.name == name) {
-                return Err(self.error("function already defined"));
-            }
+            self.kw(Keyword::Fn);
+            self.name()?;
+            let name = item.name;
             self.expect("(")?;
             let mut params: Vec<Param> = Vec::new();
             if !self.sym(")") {
@@ -442,6 +582,9 @@ impl Parser<'_> {
                 Type::I64
             };
             let body = self.block()?;
+            if self.at != item.end {
+                return Err(self.error("unexpected tokens after function body"));
+            }
             functions.push(Function {
                 name,
                 params,
@@ -700,9 +843,12 @@ impl Parser<'_> {
                 self.expect(")")?;
                 ExprKind::Cast(ty, Box::new(value))
             }
-            Kind::Ident => {
-                let name = self.name()?;
-                if let Some(record) = self.records.get(&name).cloned()
+            Kind::Ident | Kind::Sym("::") => {
+                let name = self.path()?;
+                let record = self
+                    .lookup(&name, true)
+                    .and_then(|name| self.records.get(&name).cloned());
+                if let Some(record) = record
                     && self.sym("{")
                 {
                     let mut fields = Vec::new();
@@ -733,8 +879,13 @@ impl Parser<'_> {
                             self.expect(",")?;
                         }
                     }
-                    ExprKind::Call(name, args)
+                    ExprKind::Call(self.lookup(&name, false).unwrap_or(name), args)
                 } else {
+                    if name.contains("::") {
+                        return Err(self.error(
+                            "qualified names require a function call or struct initializer",
+                        ));
+                    }
                     ExprKind::Var(name)
                 }
             }

@@ -104,6 +104,16 @@ def main():
     return_sum='+'.join(f'a{i}' for i in range(32))
     cases.append(('return_32_arguments', 'struct P { x:i64 } fn make('+return_params+')->P { return P { x:'+return_sum+' }; } fn main() { let p=make('+return_values+'); printi(p.x); }', b'496\n', 0))
     cases.append(('return_nested_constructor', 'struct P { x:i64 } struct W { items:[P;2],name:str } fn make(n)->P { printi(n); return P { x:n }; } fn world()->W { return W { name:"world",items:[make(1),make(2)] }; } fn main() { let w=world(); println(w.name); printi(w.items[0].x+w.items[1].x); }', b'1\n2\nworld\n3\n', 0))
+    cases.extend([
+        ('module_functions', 'mod math { fn double(n) { return n*2; } } fn main() { printi(math::double(21)); }', b'42\n', 0),
+        ('module_lexical_lookup', 'fn value() { return 1; } mod a { fn value() { return 2; } mod b { fn run() { printi(value()); printi(::value()); } } } fn main() { a::b::run(); }', b'2\n1\n', 0),
+        ('module_local_shadow', 'fn value() { return 1; } mod a { fn value() { return 2; } mod b { fn value() { return 3; } fn run() { printi(value()); printi(::a::value()); printi(::value()); } } } fn main() { a::b::run(); }', b'3\n2\n1\n', 0),
+        ('module_types_return', 'mod a { struct P { x:i64,s:str } fn make(n)->P { return P { s:"a",x:n }; } } mod b { struct P { x:i64 } fn make(n)->P { return P { x:n+1 }; } } fn main() { let a=a::make(7); let b=b::make(7); println(a.s); printi(a.x); printi(b.x); }', b'a\n7\n8\n', 0),
+        ('module_cross_types', 'mod a { struct P { x:i64 } } mod b { struct W { items:[a::P;2] } fn make()->W { return W { items:[a::P { x:9 };2] }; } } fn main() { let w=b::make(); printi(w.items[1].x); }', b'9\n', 0),
+        ('module_recursion', 'mod a { fn even(n)->bool { if(n==0) { return true; } return b::odd(n-1); } } mod b { fn odd(n)->bool { if(n==0) { return false; } return a::even(n-1); } } fn main() { printi(a::even(20)); printi(b::odd(20)); }', b'1\n0\n', 0),
+        ('module_sibling_relative', 'mod a { mod math { fn add(x,y) { return x+y; } } mod game { fn score(n) { return math::add(n,2); } } } fn main() { printi(a::game::score(40)); }', b'42\n', 0),
+        ('module_type_shadow', 'struct P { x:i64 } mod a { struct P { x:bool } fn make()->::P { let p=P { x:true }; printi(p.x); return ::P { x:42 }; } } fn main() { let p=a::make(); printi(p.x); }', b'1\n42\n', 0),
+    ])
     errors = [
         ('empty_binary', 'fn main() { return 0b; }', b'integer literal'),
         ('bad_binary', 'fn main() { return 0b102; }', b'ERROR'),

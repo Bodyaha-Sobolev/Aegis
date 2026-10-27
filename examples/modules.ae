@@ -1,0 +1,21 @@
+mod math {
+    fn squared(x: i64, y: i64) { return x*x + y*y; }
+}
+mod world {
+    struct Point { x: i64, y: i64 }
+    fn initial() -> Point { return Point { x: 3, y: 4 }; }
+    fn move(point: Point, dx: i64) -> Point {
+        point.x = point.x + dx;
+        return point;
+    }
+    mod reports {
+        fn score(point: Point) { return math::squared(point.x, point.y); }
+    }
+}
+fn main() {
+    let point = world::initial();
+    printi(world::reports::score(point));
+    let moved = world::move(point, 2);
+    printi(world::reports::score(moved));
+    printi(::math::squared(6, 8));
+}
