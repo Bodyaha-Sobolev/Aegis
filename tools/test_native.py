@@ -276,6 +276,20 @@ def main():
         ('string_bad_unicode', r'fn main() { println("\u{D800}"); }', b'invalid Unicode'),
         ('string_pointer_cast', 'fn main() { printi(u64("x")); }', b'found str'),
     ])
+    cases.extend([
+        ('import_function', 'use math::twice as double; fn main() { printi(double(21)); } mod math { fn twice(n) { return n*2; } }', b'42\n', 0),
+        ('import_module', 'mod math { mod inner { fn value() { return 42; } } } use math as m; fn main() { printi(m::inner::value()); }', b'42\n', 0),
+        ('import_record', 'use model::P as Point; use model::make; mod model { struct P { x:i64 } fn make()->P { return P { x:42 }; } } fn take(p:Point)->Point { p.x=p.x+1; return p; } fn main() { let p:Point=make(); let q=take(p); printi(p.x); printi(q.x); }', b'42\n43\n', 0),
+        ('import_scope', 'mod a { fn f() { return 1; } } mod b { fn f() { return 2; } } use a::f as f; mod app { use b::f as f; mod child { fn run() { return f(); } } fn run() { return child::run(); } } fn main() { printi(f()); printi(app::run()); }', b'1\n2\n', 0),
+        ('import_absolute', 'fn f() { return 42; } mod a { struct P { x:i64 } } mod app { use a::P as f; fn run() { return ::f(); } } fn main() { printi(app::run()); }', b'42\n', 0),
+        ('import_relative', 'mod world { mod math { fn score() { return 42; } } use math::score; mod app { use math as m; fn run() { return m::score()+score(); } } fn run() { return app::run(); } } fn main() { printi(world::run()); }', b'84\n', 0),
+    ])
+    errors.extend([
+        ('import_unknown', 'use missing::f; fn main() {}', b'unknown import target'),
+        ('import_conflict', 'mod a { fn f() {} } use a::f as main; fn main() {}', b'import name already defined'),
+        ('import_wrong_kind', 'fn f() { return 99; } mod a { struct P { x:i64 } } mod app { use a::P as f; fn run() { return f(); } } fn main() {}', b'undefined function'),
+        ('import_nominal', 'mod a { struct P { x:i64 } } mod b { struct P { x:i64 } } use a::P as A; use b::P as B; fn main() { let p:A=B { x:1 }; }', b'expected a::P'),
+    ])
     with tempfile.TemporaryDirectory(prefix='aegis-tests-') as folder:
         folder = Path(folder)
         for name, source, expected, code in cases:
@@ -290,9 +304,9 @@ def main():
         project_folder.mkdir()
         (project_folder/'world').mkdir()
         entry=project_folder/'main.ae'
-        entry.write_text('mod world; fn main() { printi(world::value()); }',encoding='utf-8')
+        entry.write_text('mod world; use world::value as answer; fn main() { printi(answer()); }',encoding='utf-8')
         module=project_folder/'world.ae'
-        module.write_text('mod math; fn value() { return math::double(21); }',encoding='utf-8')
+        module.write_text('mod math; use math::double; fn value() { return double(21); }',encoding='utf-8')
         child=project_folder/'world/math.ae'
         child.write_text('fn double(n) { return n*2; }',encoding='utf-8')
         project_exe=project_folder/'program.exe'

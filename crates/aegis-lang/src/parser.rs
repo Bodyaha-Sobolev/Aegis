@@ -206,6 +206,8 @@ pub(crate) fn parse(source: &str, tokens: Vec<Token>) -> Result<Program, Diagnos
         items: Vec::new(),
         modules: HashSet::new(),
         function_names: HashSet::new(),
+        imports: Vec::new(),
+        bindings: HashMap::new(),
     }
     .program()?;
     crate::semantics::check(source, &mut program)?;
@@ -223,6 +225,14 @@ struct Parser<'a> {
     items: Vec<Item>,
     modules: HashSet<String>,
     function_names: HashSet<String>,
+    imports: Vec<Import>,
+    bindings: HashMap<String, String>,
+}
+struct Import {
+    module: String,
+    target: String,
+    name: String,
+    span: Range<usize>,
 }
 #[derive(Clone)]
 struct Item {
@@ -315,11 +325,73 @@ impl Parser<'_> {
             if exists(&candidate) {
                 return Some(candidate);
             }
+            let (head, tail) = name.split_once("::").unwrap_or((name, ""));
+            let binding = if scope.is_empty() {
+                head.to_owned()
+            } else {
+                format!("{scope}::{head}")
+            };
+            if let Some(target) = self.bindings.get(&binding) {
+                let expanded = if tail.is_empty() {
+                    target.clone()
+                } else {
+                    format!("{target}::{tail}")
+                };
+                // An explicit binding shadows outer bindings even when it has
+                // the wrong kind. Never silently call an unrelated function.
+                return exists(&expanded).then_some(expanded);
+            }
             if scope.is_empty() {
                 return None;
             }
             scope = scope.rsplit_once("::").map_or("", |(parent, _)| parent);
         }
+    }
+    fn resolve_imports(&mut self) -> Result<(), Diagnostic> {
+        let exists = |name: &str| {
+            self.modules.contains(name)
+                || self.function_names.contains(name)
+                || self.pending_records.contains_key(name)
+        };
+        for import in &self.imports {
+            if exists(&import.name) || self.bindings.contains_key(&import.name) {
+                return Err(Diagnostic::new(
+                    self.source,
+                    import.span.clone(),
+                    format!("import name already defined: {}", import.name),
+                ));
+            }
+            // Import targets name declarations, not other imports. This keeps
+            // binding independent of source/file order and prevents cycles.
+            let resolved = if let Some(root) = import.target.strip_prefix("::") {
+                exists(root).then(|| root.to_owned())
+            } else {
+                let mut scope = import.module.as_str();
+                loop {
+                    let candidate = if scope.is_empty() {
+                        import.target.clone()
+                    } else {
+                        format!("{scope}::{}", import.target)
+                    };
+                    if exists(&candidate) {
+                        break Some(candidate);
+                    }
+                    if scope.is_empty() {
+                        break None;
+                    }
+                    scope = scope.rsplit_once("::").map_or("", |(parent, _)| parent);
+                }
+            };
+            let target = resolved.ok_or_else(|| {
+                Diagnostic::new(
+                    self.source,
+                    import.span.clone(),
+                    format!("unknown import target: {}", import.target),
+                )
+            })?;
+            self.bindings.insert(import.name.clone(), target);
+        }
+        Ok(())
     }
     fn type_name(&mut self) -> Result<Type, Diagnostic> {
         self.enter()?;
@@ -458,6 +530,31 @@ impl Parser<'_> {
             if nested && self.sym("}") {
                 return Ok(());
             }
+            if self.kw(Keyword::Use) {
+                let start = self.tokens[self.at - 1].span.start;
+                let target = self.path()?;
+                let short = if self.kw(Keyword::As) {
+                    self.name()?
+                } else {
+                    target
+                        .rsplit("::")
+                        .next()
+                        .expect("nonempty path")
+                        .to_owned()
+                };
+                self.expect(";")?;
+                let span = start..self.tokens[self.at - 1].span.end;
+                self.imports.push(Import {
+                    module: self.module.clone(),
+                    target,
+                    name: self.qualify(&short),
+                    span,
+                });
+                if self.imports.len() > 256 {
+                    return Err(self.error("import limit exceeded (256)"));
+                }
+                continue;
+            }
             if self.kw(Keyword::Mod) {
                 if depth >= 16 {
                     return Err(self.error("module nesting limit exceeded (16)"));
@@ -487,7 +584,7 @@ impl Parser<'_> {
             } else if self.kw(Keyword::Struct) {
                 Keyword::Struct
             } else {
-                return Err(self.error("expected function definition, struct or mod"));
+                return Err(self.error("expected function definition, struct, mod or use"));
             };
             let name_at = self.at;
             let short = self.name()?;
@@ -539,6 +636,7 @@ impl Parser<'_> {
     }
     fn program(mut self) -> Result<Program, Diagnostic> {
         self.collect_items(false, 0)?;
+        self.resolve_imports()?;
         for item in self.items.clone() {
             if item.kind == Keyword::Struct {
                 self.resolve_record(&item.name, self.tokens[item.start].span.clone())?;
@@ -881,7 +979,14 @@ impl Parser<'_> {
                             self.expect(",")?;
                         }
                     }
-                    ExprKind::Call(self.lookup(&name, false).unwrap_or(name), args)
+                    let target = self.lookup(&name, false).ok_or_else(|| {
+                        Diagnostic::new(
+                            self.source,
+                            token.span.clone(),
+                            format!("undefined function: {name}"),
+                        )
+                    })?;
+                    ExprKind::Call(target, args)
                 } else {
                     if name.contains("::") {
                         return Err(self.error(

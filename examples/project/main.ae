@@ -1,9 +1,12 @@
 mod math;
 mod world;
+use world::initial;
+use world::reports::score;
+use math as geometry;
 fn main() {
-    let point = world::initial();
-    printi(world::reports::score(point));
+    let point = initial();
+    printi(score(point));
     let moved = world::move(point, 2);
-    printi(world::reports::score(moved));
-    printi(math::squared(6, 8));
+    printi(score(moved));
+    printi(geometry::squared(6, 8));
 }
