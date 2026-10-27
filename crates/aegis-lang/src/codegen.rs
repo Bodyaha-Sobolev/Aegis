@@ -240,6 +240,15 @@ impl Generator<'_> {
         self.bytes(&[0x48, opcode, 0x85]);
         self.dword((-(8 * (slot as i32 + 1))) as u32);
     }
+    // Narrow results re-enter canonical form: i32 sign-extended, u32
+    // zero-extended. Redundant on already-canonical values.
+    fn canonical(&mut self, ty: &Type) {
+        match ty {
+            Type::I32 => self.bytes(&[0x48, 0x63, 0xc0]), // movsxd rax, eax
+            Type::U32 => self.bytes(&[0x89, 0xc0]),       // mov eax, eax
+            _ => {}
+        }
+    }
     fn block(&mut self, body: &[Stmt]) -> Result<(), Diagnostic> {
         let scope = self.vars.len();
         let slots = self.slots;
@@ -458,7 +467,7 @@ impl Generator<'_> {
                 } else {
                     self.bytes(&[0xe8]);
                     self.relative(if *kind == Keyword::Printi {
-                        if expr.ty == Type::U64 {
+                        if expr.ty.unsigned() {
                             self.printu
                         } else {
                             self.printi
@@ -572,8 +581,15 @@ impl Generator<'_> {
             }
             ExprKind::Cast(ty, value) => {
                 self.expr(value)?;
-                if *ty == Type::Bool {
-                    self.bytes(&[0x48, 0x85, 0xc0, 0x0f, 0x95, 0xc0, 0x48, 0x0f, 0xb6, 0xc0]);
+                match ty {
+                    Type::Bool => {
+                        self.bytes(&[0x48, 0x85, 0xc0, 0x0f, 0x95, 0xc0, 0x48, 0x0f, 0xb6, 0xc0])
+                    }
+                    // Conversions keep the low bits: truncate, then restore the
+                    // canonical form of the target type.
+                    Type::I32 => self.bytes(&[0x48, 0x63, 0xc0]),
+                    Type::U32 => self.bytes(&[0x89, 0xc0]),
+                    _ => {}
                 }
             }
             ExprKind::Var(name) => {
@@ -587,8 +603,14 @@ impl Generator<'_> {
             ExprKind::Unary(op, value) => {
                 self.expr(value)?;
                 match *op {
-                    "-" => self.bytes(&[0x48, 0xf7, 0xd8]),
-                    "~" => self.bytes(&[0x48, 0xf7, 0xd0]),
+                    "-" => {
+                        self.bytes(&[0x48, 0xf7, 0xd8]);
+                        self.canonical(&expr.ty);
+                    }
+                    "~" => {
+                        self.bytes(&[0x48, 0xf7, 0xd0]);
+                        self.canonical(&expr.ty);
+                    }
                     "!" => {
                         self.bytes(&[0x48, 0x85, 0xc0, 0x0f, 0x94, 0xc0, 0x48, 0x0f, 0xb6, 0xc0])
                     }
@@ -704,27 +726,77 @@ impl Generator<'_> {
                     return Ok(());
                 }
                 match *op {
-                    "+" => self.bytes(&[0x48, 0x01, 0xc8]),
-                    "-" => self.bytes(&[0x48, 0x29, 0xc8]),
-                    "*" => self.bytes(&[0x48, 0x0f, 0xaf, 0xc1]),
+                    "+" => {
+                        self.bytes(&[0x48, 0x01, 0xc8]);
+                        self.canonical(&expr.ty);
+                    }
+                    "-" => {
+                        self.bytes(&[0x48, 0x29, 0xc8]);
+                        self.canonical(&expr.ty);
+                    }
+                    "*" => {
+                        self.bytes(&[0x48, 0x0f, 0xaf, 0xc1]);
+                        self.canonical(&expr.ty);
+                    }
                     "&" => self.bytes(&[0x48, 0x21, 0xc8]),
                     "|" => self.bytes(&[0x48, 0x09, 0xc8]),
                     "^" => self.bytes(&[0x48, 0x31, 0xc8]),
-                    "<<" => self.bytes(&[0x48, 0xd3, 0xe0]),
-                    ">>" => {
-                        self.bytes(&[0x48, 0xd3, if left.ty == Type::U64 { 0xe8 } else { 0xf8 }])
+                    "<<" => {
+                        if expr.ty.narrow() {
+                            self.bytes(&[0xd3, 0xe0]);
+                            self.canonical(&expr.ty);
+                        } else {
+                            self.bytes(&[0x48, 0xd3, 0xe0]);
+                        }
                     }
-                    ">>>" => self.bytes(&[0x48, 0xd3, 0xe8]),
+                    ">>" => {
+                        if expr.ty.narrow() {
+                            self.bytes(&[0xd3, if left.ty.unsigned() { 0xe8 } else { 0xf8 }]);
+                            self.canonical(&expr.ty);
+                        } else {
+                            self.bytes(&[
+                                0x48,
+                                0xd3,
+                                if left.ty == Type::U64 { 0xe8 } else { 0xf8 },
+                            ]);
+                        }
+                    }
+                    ">>>" => {
+                        if expr.ty.narrow() {
+                            self.bytes(&[0xd3, 0xe8]);
+                            self.canonical(&expr.ty);
+                        } else {
+                            self.bytes(&[0x48, 0xd3, 0xe8]);
+                        }
+                    }
                     "/" | "%" => {
                         self.bytes(&[0x48, 0x85, 0xc9]);
                         let nonzero = self.jump(Some(0x85));
                         self.exit(70);
                         self.here(nonzero);
-                        if left.ty == Type::U64 {
+                        if left.ty.unsigned() {
+                            // Canonical u32/u64 operands cannot fault and the
+                            // quotient always fits the unsigned width.
                             self.bytes(&[0x31, 0xd2, 0x48, 0xf7, 0xf1]);
                             if *op == "%" {
                                 self.bytes(&[0x48, 0x89, 0xd0]);
                             }
+                            return Ok(());
+                        }
+                        if left.ty == Type::I32 {
+                            // Canonical operands cannot fault; only the
+                            // quotient may leave the i32 range (MIN / -1).
+                            self.bytes(&[0x48, 0x99, 0x48, 0xf7, 0xf9]);
+                            if *op == "%" {
+                                self.bytes(&[0x48, 0x89, 0xd0]);
+                                return Ok(());
+                            }
+                            self.bytes(&[0x48, 0x63, 0xd0]); // movsxd rdx, eax
+                            self.bytes(&[0x48, 0x39, 0xd0]); // cmp rdx, rax
+                            let in_range = self.jump(Some(0x84));
+                            self.exit(71);
+                            self.here(in_range);
+                            self.bytes(&[0x48, 0x89, 0xd0]); // mov rax, rdx
                             return Ok(());
                         }
                         self.bytes(&[0x48, 0xba]);
@@ -746,28 +818,28 @@ impl Generator<'_> {
                             "==" => 0x94,
                             "!=" => 0x95,
                             "<" => {
-                                if left.ty == Type::U64 {
+                                if left.ty.unsigned() {
                                     0x92
                                 } else {
                                     0x9c
                                 }
                             }
                             ">" => {
-                                if left.ty == Type::U64 {
+                                if left.ty.unsigned() {
                                     0x97
                                 } else {
                                     0x9f
                                 }
                             }
                             "<=" => {
-                                if left.ty == Type::U64 {
+                                if left.ty.unsigned() {
                                     0x96
                                 } else {
                                     0x9e
                                 }
                             }
                             ">=" => {
-                                if left.ty == Type::U64 {
+                                if left.ty.unsigned() {
                                     0x93
                                 } else {
                                     0x9d
@@ -864,51 +936,69 @@ impl Generator<'_> {
 }
 // Fold only fully constant, side-effect-free trees. Invalid division stays in
 // generated code and follows the same runtime exit rules as variable division.
+// Narrow results are canonicalized to match the emitted instructions.
+fn canonical_value(ty: &Type, value: u64) -> u64 {
+    match ty {
+        Type::I32 => ((value as u32) as i32) as u64,
+        Type::U32 => value & 0xffff_ffff,
+        _ => value,
+    }
+}
+
 fn constant(expr: &Expr) -> Option<u64> {
+    let narrow32 = expr.ty.narrow();
+    let shift_mask = if narrow32 { 31u64 } else { 63 };
     match &expr.kind {
-        ExprKind::Number(n) => Some(*n),
+        ExprKind::Number(n) => Some(canonical_value(&expr.ty, *n)),
         ExprKind::Bool(value) => Some(u64::from(*value)),
         ExprKind::Cast(ty, value) => constant(value).map(|n| {
             if *ty == Type::Bool {
                 u64::from(n != 0)
             } else {
-                n
+                canonical_value(ty, n)
             }
         }),
         ExprKind::Unary(op, e) => {
             let value = constant(e)?;
             Some(match *op {
                 "+" => value,
-                "-" => value.wrapping_neg(),
+                "-" => canonical_value(&expr.ty, value.wrapping_neg()),
                 "!" => u64::from(value == 0),
-                "~" => !value,
+                "~" => canonical_value(&expr.ty, !value),
                 _ => return None,
             })
         }
         ExprKind::Binary(op, left, right) => {
             let a = constant(left)?;
             let b = constant(right)?;
+            let canonical = |value: u64| canonical_value(&expr.ty, value);
             Some(match *op {
-                "+" => a.wrapping_add(b),
-                "-" => a.wrapping_sub(b),
-                "*" => a.wrapping_mul(b),
+                "+" => canonical(a.wrapping_add(b)),
+                "-" => canonical(a.wrapping_sub(b)),
+                "*" => canonical(a.wrapping_mul(b)),
                 "&" => a & b,
                 "|" => a | b,
                 "^" => a ^ b,
-                "<<" => a.wrapping_shl((b & 63) as u32),
-                ">>" if left.ty == Type::U64 => a.wrapping_shr((b & 63) as u32),
-                ">>" => (a as i64).wrapping_shr((b & 63) as u32) as u64,
-                ">>>" => a.wrapping_shr((b & 63) as u32),
-                "/" if left.ty == Type::U64 => a.checked_div(b)?,
-                "%" if left.ty == Type::U64 => a.checked_rem(b)?,
+                "<<" => canonical(a.wrapping_shl((b & shift_mask) as u32)),
+                ">>" if left.ty.unsigned() => a.wrapping_shr((b & shift_mask) as u32),
+                ">>" if narrow32 => {
+                    canonical((a as i32).wrapping_shr((b & shift_mask) as u32) as u64)
+                }
+                ">>" => (a as i64).wrapping_shr((b & shift_mask) as u32) as u64,
+                ">>>" if narrow32 => canonical(((a as u32) >> (b & shift_mask)) as u64),
+                ">>>" => a.wrapping_shr((b & shift_mask) as u32),
+                "/" if left.ty.unsigned() => a.checked_div(b)?,
+                "%" if left.ty.unsigned() => a.checked_rem(b)?,
+                "/" if narrow32 => canonical((a as i32).checked_div(b as i32)? as u64),
+                "%" if narrow32 => canonical((a as i32).checked_rem(b as i32)? as u64),
                 "/" => (a as i64).checked_div(b as i64)? as u64,
                 "%" => (a as i64).checked_rem(b as i64)? as u64,
                 "==" => u64::from(a == b),
                 "!=" => u64::from(a != b),
-                "<" if left.ty == Type::U64 => u64::from(a < b),
-                ">" if left.ty == Type::U64 => u64::from(a > b),
-                "<=" if left.ty == Type::U64 => u64::from(a <= b),
-                ">=" if left.ty == Type::U64 => u64::from(a >= b),
+                "<" if left.ty.unsigned() => u64::from(a < b),
+                ">" if left.ty.unsigned() => u64::from(a > b),
+                "<=" if left.ty.unsigned() => u64::from(a <= b),
+                ">=" if left.ty.unsigned() => u64::from(a >= b),
                 "<" => u64::from((a as i64) < (b as i64)),
                 ">" => u64::from((a as i64) > (b as i64)),
                 "<=" => u64::from((a as i64) <= (b as i64)),

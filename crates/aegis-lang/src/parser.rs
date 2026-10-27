@@ -12,6 +12,8 @@ use std::{
 pub(crate) enum Type {
     I64,
     U64,
+    I32,
+    U32,
     Bool,
     Str,
     Array(Arc<Type>, usize),
@@ -68,7 +70,16 @@ impl Type {
         }
     }
     pub fn integer(&self) -> bool {
-        matches!(self, Self::I64 | Self::U64)
+        matches!(self, Self::I64 | Self::U64 | Self::I32 | Self::U32)
+    }
+    // Narrow types live in 8-byte slots as canonical values: i32 is always
+    // sign-extended, u32 always zero-extended. Codegen canonicalizes only at
+    // value producers; bitwise & | ^ on canonical operands stay canonical.
+    pub fn unsigned(&self) -> bool {
+        matches!(self, Self::U64 | Self::U32)
+    }
+    pub fn narrow(&self) -> bool {
+        matches!(self, Self::I32 | Self::U32)
     }
 }
 impl std::fmt::Display for Type {
@@ -82,6 +93,8 @@ impl std::fmt::Display for Type {
         f.write_str(match self {
             Self::I64 => "i64",
             Self::U64 => "u64",
+            Self::I32 => "i32",
+            Self::U32 => "u32",
             Self::Bool => "bool",
             Self::Str => "str",
             Self::Array(..) | Self::Record(_) => unreachable!(),
@@ -423,9 +436,11 @@ impl Parser<'_> {
         let ty = match self.token().kind {
             Kind::Keyword(Keyword::I64) => Type::I64,
             Kind::Keyword(Keyword::U64) => Type::U64,
+            Kind::Keyword(Keyword::I32) => Type::I32,
+            Kind::Keyword(Keyword::U32) => Type::U32,
             Kind::Keyword(Keyword::Bool) => Type::Bool,
             Kind::Keyword(Keyword::Str) => Type::Str,
-            _ => return Err(self.error("expected type i64, u64, bool or str")),
+            _ => return Err(self.error("expected type i64, u64, i32, u32, bool or str")),
         };
         self.at += 1;
         Ok(ty)
@@ -936,7 +951,9 @@ impl Parser<'_> {
                 self.at += 1;
                 ExprKind::Bool(token.kind == Kind::Keyword(Keyword::True))
             }
-            Kind::Keyword(Keyword::I64 | Keyword::U64 | Keyword::Bool) => {
+            Kind::Keyword(
+                Keyword::I64 | Keyword::U64 | Keyword::I32 | Keyword::U32 | Keyword::Bool,
+            ) => {
                 let ty = self.type_name()?;
                 self.expect("(")?;
                 let value = self.expr(1)?;

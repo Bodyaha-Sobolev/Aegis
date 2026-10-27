@@ -293,6 +293,141 @@ def main():
         ('import_wrong_kind', 'fn f() { return 99; } mod a { struct P { x:i64 } } mod app { use a::P as f; fn run() { return f(); } } fn main() {}', b'undefined function'),
         ('import_nominal', 'mod a { struct P { x:i64 } } mod b { struct P { x:i64 } } use a::P as A; use b::P as B; fn main() { let p:A=B { x:1 }; }', b'expected a::P'),
     ])
+    # Narrow 32-bit integers: every result is checked against an independent
+    # Python model of wrapping 32-bit semantics. Untyped literals stay i64, so
+    # two-billion values never need a suffix by default.
+    mask32 = (1 << 32) - 1
+    def i32(n):
+        n &= mask32
+        return n - (1 << 32) if n >= (1 << 31) else n
+    def u32(n):
+        return n & mask32
+    def tdiv(a, b):
+        q = abs(a) // abs(b)
+        return q if (a < 0) == (b < 0) else -q
+    def tmod(a, b):
+        return a - tdiv(a, b) * b
+    def i32lit(n):
+        n = i32(n)
+        return f'(-{-n})' if n < 0 else str(n)
+    def u32lit(n):
+        return str(u32(n))
+    i32_values = [0, 1, 2, 5, 31, 100, 0x12345678, 0x7fffffff,
+                  -1, -2, -31, -100, -2147483648, 2147483647, -0x12345678]
+    u32_values = [0, 1, 2, 5, 31, 100, 0x12345678, 0x7fffffff, 0x80000000, 4294967295]
+
+    def binary_oracle(name, ops, ty, result_ty, literal, values):
+        for index, (op, model) in enumerate(ops.items()):
+            body, expected = [], []
+            for i, a in enumerate(values):
+                for b in [values[(i + 3) % len(values)],
+                          values[(i + 1) % len(values)],
+                          values[len(values) - 1 - i]]:
+                    la, lb = literal(a), literal(b)
+                    body.extend([f'printi(calc({la},{lb}));', f'printi({ty}({la}) {op} {lb});'])
+                    expected.extend([str(model(a, b))] * 2)
+            source = (f'fn calc(a: {ty}, b: {ty}) -> {result_ty} {{ return a {op} b; }} '
+                      'fn main() {' + ''.join(body) + 'return 0; }')
+            cases.append((f'{name}_{index}', source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    binary_oracle('int32_arith', {
+        '+': lambda a, b: i32(a + b), '-': lambda a, b: i32(a - b),
+        '*': lambda a, b: i32(a * b), '&': lambda a, b: i32(a & b),
+        '|': lambda a, b: i32(a | b), '^': lambda a, b: i32(a ^ b),
+    }, 'i32', 'i32', i32lit, i32_values)
+    binary_oracle('int32_cmp', {
+        '==': lambda a, b: int(a == b), '!=': lambda a, b: int(a != b),
+        '<': lambda a, b: int(a < b), '>': lambda a, b: int(a > b),
+        '<=': lambda a, b: int(a <= b), '>=': lambda a, b: int(a >= b),
+    }, 'i32', 'bool', i32lit, i32_values)
+    binary_oracle('u32_arith', {
+        '+': lambda a, b: u32(a + b), '-': lambda a, b: u32(a - b),
+        '*': lambda a, b: u32(a * b), '&': lambda a, b: a & b,
+        '|': lambda a, b: a | b, '^': lambda a, b: a ^ b,
+    }, 'u32', 'u32', u32lit, u32_values)
+    binary_oracle('u32_cmp', {
+        '==': lambda a, b: int(a == b), '!=': lambda a, b: int(a != b),
+        '<': lambda a, b: int(a < b), '>': lambda a, b: int(a > b),
+    }, 'u32', 'bool', u32lit, u32_values)
+
+    def shift_oracle(name, ty, literal, values, models):
+        counts = [0, 1, 5, 31, 32, 33, 63, 0xffffffff]
+        for index, (op, model) in enumerate(models.items()):
+            body, expected = [], []
+            for a in values:
+                for k in counts:
+                    la, lk = literal(a), str(k)
+                    body.extend([f'printi(shift({la},{lk}));', f'printi({ty}({la}) {op} {lk});'])
+                    expected.extend([str(model(a, k))] * 2)
+            source = (f'fn shift(a: {ty}, k: i64) -> {ty} {{ return a {op} k; }} '
+                      'fn main() {' + ''.join(body) + 'return 0; }')
+            cases.append((f'{name}_{index}', source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    shift_oracle('int32_shift', 'i32', i32lit, i32_values, {
+        '<<': lambda a, k: i32(a << (k & 31)),
+        '>>': lambda a, k: a >> (k & 31),
+        '>>>': lambda a, k: i32((a & mask32) >> (k & 31)),
+    })
+    shift_oracle('u32_shift', 'u32', u32lit, u32_values, {
+        '<<': lambda a, k: u32(a << (k & 31)),
+        '>>': lambda a, k: a >> (k & 31),
+        '>>>': lambda a, k: a >> (k & 31),
+    })
+
+    def division_oracle(name, ty, literal, values, quotient, remainder):
+        body, expected = [], []
+        for a in values:
+            for b in values:
+                if b == 0 or (ty == 'i32' and a == -(1 << 31) and b == -1):
+                    continue
+                la, lb = literal(a), literal(b)
+                body.extend([f'printi(q({la},{lb}));', f'printi({ty}({la}) / {lb});',
+                             f'printi(r({la},{lb}));', f'printi({ty}({la}) % {lb});'])
+                expected.extend([str(quotient(a, b)), str(quotient(a, b)),
+                                 str(remainder(a, b)), str(remainder(a, b))])
+        source = (f'fn q(a: {ty}, b: {ty}) -> {ty} {{ return a / b; }} '
+                  f'fn r(a: {ty}, b: {ty}) -> {ty} {{ return a % b; }} '
+                  'fn main() {' + ''.join(body) + 'return 0; }')
+        cases.append((name, source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    division_oracle('int32_division', 'i32', i32lit, i32_values, tdiv, tmod)
+    division_oracle('u32_division', 'u32', u32lit, u32_values,
+                    lambda a, b: a // b, lambda a, b: a % b)
+
+    def unary_oracle(name, ty, literal, values, model):
+        body, expected = [], []
+        for a in values:
+            la = literal(a)
+            body.extend([f'printi(neg({la}));', f'printi(inv({la}));'])
+            expected.extend([str(model[0](a)), str(model[1](a))])
+        source = (f'fn neg(a: {ty}) -> {ty} {{ return -a; }} '
+                  f'fn inv(a: {ty}) -> {ty} {{ return ~a; }} '
+                  'fn main() {' + ''.join(body) + 'return 0; }')
+        cases.append((name, source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    unary_oracle('int32_unary', 'i32', i32lit, i32_values,
+                 (lambda a: i32(-a), lambda a: i32(~a)))
+    unary_oracle('u32_unary', 'u32', u32lit, u32_values,
+                 (lambda a: u32(-a), lambda a: u32(~a)))
+    cases.extend([
+        ('int32_hex_patterns', 'fn main() { let h: i32 = 0x80000000; let f: i32 = 0xffffffff; let t: i32 = 0x7fffffff; printi(h); printi(f); printi(t); printi(f + 1); printi(h >> 31); }', b'-2147483648\n-1\n2147483647\n0\n-1\n', 0),
+        ('u32_print', 'fn main() { let a: u32 = 4294967295; let b: u32 = 0; printi(a); printi(b); printi(u32(-1)); printi(a - 1); }', b'4294967295\n0\n4294967295\n4294967294\n', 0),
+        ('int32_div_zero', 'fn main() { let x: i32 = 5; printi(x / 0); }', b'', 70),
+        ('int32_mod_zero', 'fn main() { let x: i32 = 5; printi(x % 0); }', b'', 70),
+        ('int32_div_overflow', 'fn main() { let m: i32 = -2147483648; printi(m / -1); }', b'', 71),
+        ('int32_mod_overflow', 'fn main() { let m: i32 = -2147483648; printi(m % -1); }', b'0\n', 0),
+        ('u32_div_zero', 'fn main() { let x: u32 = 5; printi(x / 0); }', b'', 70),
+        ('int32_casts', 'fn main() { let big = 0x123456789; printi(i32(big)); printi(u32(big)); printi(i64(u32(-1))); printi(u64(i32(-1))); printi(bool(5)); printi(bool(0)); }', b'591751049\n591751049\n4294967295\n18446744073709551615\n1\n0\n', 0),
+        ('int32_aggregates', 'struct P { x:i32, y:u32 } fn sum(p:P, a:[i32;3]) -> i32 { return p.x + i32(p.y) + a[0] + a[1] + a[2]; } fn make(n:i32)->P { return P { x:n, y:u32(n) }; } fn main() { let p = make(-5); let a: [i32;3] = [1, 2, -3]; printi(sum(p, a)); a[0] = 100; printi(a[0]); printi(p.x); let q = p; q.x = 42; printi(p.x); printi(q.x); printi(len(a)); }', b'-10\n100\n-5\n-5\n42\n3\n', 0),
+        ('int32_wrapping_loop', 'fn main() { let i: i32 = 0; let sum: i32 = 0; while(i < 100000) { sum = sum + i; i = i + 1; } printi(sum); }', b'704982704\n', 0),
+        ('i64_default_no_two_gig', 'fn main() { let x = 3000000000; printi(x * 2); printi(x / 3); let y: u64 = 10000000000; printi(y); }', b'6000000000\n1000000000\n10000000000\n', 0),
+    ])
+    errors.extend([
+        ('int32_literal_range', 'fn main() { let x: i32 = 2147483648; }', b'does not fit in i32'),
+        ('u32_literal_range', 'fn main() { let x: u32 = 4294967296; }', b'does not fit in u32'),
+        ('narrow_no_implicit', 'fn main() { let x: i32 = 0; let y: u32 = x; }', b'type mismatch'),
+        ('narrow_param_range', 'fn f(x: i32) {} fn main() { f(5000000000); }', b'does not fit in i32'),
+    ])
     with tempfile.TemporaryDirectory(prefix='aegis-tests-') as folder:
         folder = Path(folder)
         notices=run(COMPILER,'--licenses')

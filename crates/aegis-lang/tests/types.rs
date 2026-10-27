@@ -64,3 +64,66 @@ fn typed_literals_and_runtime_have_distinct_signed_semantics() {
     let b = compile("fn main() { return 1; }").expect("true as integer");
     assert_eq!(a.executable, b.executable);
 }
+
+#[test]
+fn narrow_signatures_reach_the_ide_outline() {
+    let functions = analyze("fn sample(x: i32, y: u32) -> i32 { return x; } fn main() {}")
+        .expect("narrow signature");
+    assert_eq!(functions[0].signature, "sample(x: i32, y: u32) -> i32");
+}
+
+#[test]
+fn narrow_literals_use_width_aware_bounds() {
+    for source in [
+        "fn main() { let x: i32 = 3000000000; }",
+        "fn main() { let x: i32 = 2147483648; }",
+        "fn main() { let x: i32 = -3000000000; }",
+        "fn main() { let x: u32 = 4294967296; }",
+        "fn f(x: i32) {} fn main() { f(5000000000); }",
+        "fn main() { let x: i32 = 0; let y: u32 = x; }",
+    ] {
+        let error = compile(source).expect_err(source);
+        assert!(
+            error.message.contains("does not fit") || error.message.contains("type mismatch"),
+            "{error}"
+        );
+        assert!(source.get(error.span).is_some());
+    }
+    for source in [
+        "fn main() { let x: i32 = 2147483647; let m: i32 = -2147483648; printi(x+m); }",
+        "fn main() { let x: i32 = 0x80000000; let f: i32 = 0xffffffff; printi(x+f); }",
+        "fn main() { let x: u32 = 4294967295; let y: u32 = 0xffffffff; printi(x+y); }",
+        "fn main() { let x: i32 = -(-2147483648); printi(x); }",
+        "fn main() { let x: i32 = -(2147483648); printi(x); }",
+        "fn main() { let big = 3000000000; printi(big); }",
+    ] {
+        compile(source).expect(source);
+    }
+}
+
+#[test]
+fn narrow_folding_matches_the_canonical_runtime_form() {
+    let pairs = [
+        ("2000000000 + 2000000000", "i32(4000000000)"),
+        ("-1 << 31", "i32(0x80000000)"),
+        ("2147483647 + 1", "i32(0x80000000)"),
+        ("~0", "i32(-1)"),
+        ("-1 >>> 4", "i32(0x0fffffff)"),
+    ];
+    for (folded, runtime) in pairs {
+        let a = compile(&format!(
+            "fn main() {{ let x: i32 = {folded}; return i64(x); }}"
+        ))
+        .expect(folded);
+        let b = compile(&format!(
+            "fn main() {{ let x: i32 = {runtime}; return i64(x); }}"
+        ))
+        .expect(runtime);
+        assert_eq!(a.executable, b.executable, "{folded}");
+    }
+    let a =
+        compile("fn main() { let x: u32 = 4294967295; return i64(u64(x)); }").expect("u32 folded");
+    let b =
+        compile("fn main() { let x: u32 = u32(-1); return i64(u64(x)); }").expect("u32 runtime");
+    assert_eq!(a.executable, b.executable);
+}

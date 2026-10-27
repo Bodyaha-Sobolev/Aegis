@@ -1,0 +1,49 @@
+// Narrow 32-bit integers: i32 and u32.
+// Untyped literals and variables stay 64-bit, so values like 3000000000
+// never need a suffix. A decimal literal that cannot fit the annotated
+// width is a compile-time error; hex/binary bit patterns may use the full
+// unsigned width of the target type, and -2147483648 needs no cast.
+
+struct Point { x: i32, y: i32 }
+
+fn dot(a: Point, b: Point) -> i32 {
+    return a.x * b.x + a.y * b.y;
+}
+
+fn clamp(v: u32, low: u32, high: u32) -> u32 {
+    if (v < low) { return low; }
+    if (v > high) { return high; }
+    return v;
+}
+
+fn main() {
+    let big = 3000000000;      // i64 by default: no two-billion limit here.
+    let max: i32 = 2147483647;
+    let min: i32 = -2147483648;
+    let bits: i32 = 0x80000000;
+    let mask: u32 = 0xffffffff;
+
+    println("64-bit default:");
+    printi(big * 2);
+
+    println("i32 arithmetic wraps deterministically:");
+    printi(max + 1);
+    printi(min);
+
+    println("hex bit patterns:");
+    printi(bits);
+    printi(mask);
+
+    println("shifts count modulo 32:");
+    printi(bits >> 31);
+    printi(bits >>> 28);
+    printi(mask >> 16);
+
+    println("unsigned comparisons:");
+    printi(clamp(4000000000, 0, 4294967295));
+
+    println("narrow struct fields:");
+    let p = Point { x: -5, y: 7 };
+    let q = Point { x: 3, y: -2 };
+    printi(dot(p, q));
+}

@@ -25,6 +25,7 @@ pub(crate) fn check(source: &str, program: &mut Program) -> Result<(), Diagnosti
         signatures,
         vars: Vec::new(),
         result: Type::I64,
+        negate_literal: false,
     };
     for function in &mut program.functions {
         checker.vars.clear();
@@ -62,6 +63,8 @@ struct Checker<'a> {
     signatures: HashMap<String, (Vec<Type>, Type)>,
     vars: Vec<(String, Type)>,
     result: Type,
+    // Set by unary minus so its immediate literal may reach the type minimum.
+    negate_literal: bool,
 }
 impl Checker<'_> {
     fn error(&self, span: &Range<usize>, message: impl Into<String>) -> Diagnostic {
@@ -296,12 +299,37 @@ impl Checker<'_> {
     }
     fn expr(&mut self, expr: &mut Expr, expected: Option<Type>) -> Result<Type, Diagnostic> {
         let hint = self.hint(expr);
+        let negated = std::mem::take(&mut self.negate_literal);
         let ty = match &mut expr.kind {
             ExprKind::String(_) => Type::Str,
-            ExprKind::Number(_) => expected
-                .clone()
-                .filter(|t| t.integer())
-                .unwrap_or(Type::I64),
+            ExprKind::Number(n) => {
+                let ty = expected
+                    .clone()
+                    .filter(|t| t.integer())
+                    .unwrap_or(Type::I64);
+                // Positive decimal literals must fit; the negated form may
+                // reach the minimum, so -2147483648 is writable without a
+                // cast. Hex/binary literals carry bit patterns and may use
+                // the full unsigned width of the target type.
+                let radix_wide = matches!(
+                    self.source.get(expr.span.clone()),
+                    Some(text) if text.starts_with("0x") || text.starts_with("0X") || text.starts_with("0b") || text.starts_with("0B")
+                );
+                let max = match ty {
+                    Type::I32 if negated => 1u64 << 31,
+                    Type::I32 if radix_wide => u32::MAX as u64,
+                    Type::I32 => i32::MAX as u64,
+                    Type::U32 => u32::MAX as u64,
+                    _ => u64::MAX,
+                };
+                if *n > max {
+                    return Err(self.error(
+                        &expr.span,
+                        format!("integer literal {n} does not fit in {ty}"),
+                    ));
+                }
+                ty
+            }
             ExprKind::Array(_) | ExprKind::Repeat(..) | ExprKind::Record(..) => {
                 return Err(self.error(
                     &expr.span,
@@ -380,14 +408,17 @@ impl Checker<'_> {
                 result
             }
             ExprKind::Unary(op, value) => {
-                let ty = self.numeric(
-                    value,
-                    if *op == "!" {
-                        None
-                    } else {
-                        hint.or(expected.clone())
-                    },
-                )?;
+                let ty = if *op == "!" {
+                    self.numeric(value, None)?
+                } else {
+                    let target = hint.or(expected.clone());
+                    if *op == "-" && target.as_ref().is_some_and(|t| t.narrow()) {
+                        self.negate_literal = true;
+                    }
+                    let checked = self.numeric(value, target)?;
+                    self.negate_literal = false;
+                    checked
+                };
                 if *op == "!" {
                     Type::Bool
                 } else {
