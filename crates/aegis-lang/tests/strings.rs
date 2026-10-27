@@ -65,7 +65,7 @@ fn readonly_string_data_is_a_separate_nonexecutable_pe_section() {
     let size = read32(section + 16) as usize;
     assert_eq!(raw % 512, 0);
     assert_eq!(size % 512, 0);
-    assert_eq!(b.len(), raw + size);
+    assert_eq!(b.len(), raw + size + 512); // Read-only, discardable relocation section follows.
     assert!(b[raw..].windows(5).any(|w| w == b"hello"));
     let pooled =
         compile(r#"fn main() { print("same"); print("\u{73}ame"); }"#).expect("deduplicated pool");

@@ -4,6 +4,7 @@ import os
 import stat
 import subprocess
 import tempfile
+from windows_aslr import run_relocated
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = Path(os.environ.get('AEGIS_COMPILER', ROOT / 'target' / 'debug' / 'aegis-cli.exe'))
@@ -277,6 +278,7 @@ def main():
         ('string_pointer_cast', 'fn main() { printi(u64("x")); }', b'found str'),
     ])
     cases.extend([
+        ('aslr_workload', 'mod world { struct P { x:i64, name:str } fn make(n)->P { return P { x:n,name:"loaded" }; } fn sum(n) { if(n==0) { return 0; } return n+sum(n-1); } } fn main() { let p=world::make(21); let a=[p;2]; a[1].x=42; if(a[0].x!=21 || a[1].x!=42 || world::sum(9)!=45 || len(a[0].name)!=6 || a[0].name[1]!=111 || a[0].name!="loaded") { return 99; } println(a[0].name); printi(a[1].x); return 7; }', b'loaded\n42\n', 7),
         ('import_function', 'use math::twice as double; fn main() { printi(double(21)); } mod math { fn twice(n) { return n*2; } }', b'42\n', 0),
         ('import_module', 'mod math { mod inner { fn value() { return 42; } } } use math as m; fn main() { printi(m::inner::value()); }', b'42\n', 0),
         ('import_record', 'use model::P as Point; use model::make; mod model { struct P { x:i64 } fn make()->P { return P { x:42 }; } } fn take(p:Point)->Point { p.x=p.x+1; return p; } fn main() { let p:Point=make(); let q=take(p); printi(p.x); printi(q.x); }', b'42\n43\n', 0),
@@ -300,6 +302,53 @@ def main():
             result = run(exe)
             assert (result.stdout, result.returncode) == (expected, code), (name, result.stdout, result.stderr, result.returncode)
             print('PASS', name)
+        # Observe the actual image base through documented debug events. These
+        # are only freshly created fixture children; no process-memory access.
+        for name in ['aslr_workload', 'string_large_data', 'return_full_frame',
+                     'return_32_arguments', 'array_negative_read', 'division_zero']:
+            exe = folder/(name+'.exe')
+            data = exe.read_bytes()
+            preferred = int.from_bytes(data[0x98+0x18:0x98+0x20], 'little')
+            base, code = run_relocated(exe)
+            expected_code = next(code for n, _, _, code in cases if n == name)
+            assert base != preferred and base > 0xffffffff, (name, hex(base), hex(preferred))
+            assert code == expected_code, (name, code, expected_code)
+            print('PASS mandatory ASLR', name, hex(base))
+        # Disabling DynamicBase on a fixture still has to rebase under the
+        # mandatory child policy: this checks the harness really forces ASLR.
+        data = bytearray((folder/'aslr_workload.exe').read_bytes())
+        data[0x98+0x46:0x98+0x48] = (0x100).to_bytes(2, 'little')
+        forced = folder/'mandatory-aslr.exe'
+        forced.write_bytes(data)
+        preferred = int.from_bytes(data[0x98+0x18:0x98+0x20], 'little')
+        base, code = run_relocated(forced)
+        assert base != preferred and code == 7, (hex(base), code)
+        print('PASS mandatory policy rebases a non-DynamicBase fixture')
+        # A fixed-image control must be refused when relocations are required.
+        data[0x96:0x98] = (0x23).to_bytes(2, 'little')
+        data[0x98+0x98:0x98+0xa0] = bytes(8)
+        fixed = folder/'stripped-aslr.exe'
+        fixed.write_bytes(data)
+        try:
+            run_relocated(fixed)
+        except OSError as error:
+            assert error.winerror in (193, 487, 623), error
+        else:
+            raise AssertionError('mandatory ASLR accepted a stripped fixed image')
+        print('PASS mandatory ASLR rejects missing relocations')
+        src, hanging = folder/'aslr-timeout.ae', folder/'aslr-timeout.exe'
+        src.write_text('fn main() { while(1) {} }', encoding='utf-8')
+        result = run(COMPILER, 'build', src, hanging)
+        assert result.returncode == 0, result.stderr
+        try:
+            run_relocated(hanging, timeout=0.25)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError('ASLR test failed to stop its own timed-out child')
+        # The image must be released after cleanup, not left running/locked.
+        hanging.unlink()
+        print('PASS ASLR timeout cleans up its own child and image')
         project_folder=folder/'project'
         project_folder.mkdir()
         (project_folder/'world').mkdir()
@@ -332,7 +381,7 @@ def main():
         inspected = folder/'strings_example.exe'
         before = inspected.read_bytes()
         report = run(COMPILER, 'inspect', inspected)
-        assert report.returncode == 0 and all(s in report.stdout for s in [b'PE64 x64',b'.rdata',b'KERNEL32.DLL',b'WriteFile',b'NX-compatible=true']), (report.stdout,report.stderr)
+        assert report.returncode == 0 and all(s in report.stdout for s in [b'PE64 x64',b'.rdata',b'.reloc',b'KERNEL32.DLL',b'WriteFile',b'NX-compatible=true',b'DynamicBase=true',b'HighEntropyVA=true']), (report.stdout,report.stderr)
         assert inspected.read_bytes() == before
         print('PASS read-only PE inspection')
         damaged = folder/'invalid-pe.bin'
@@ -394,7 +443,7 @@ def main():
             result = run(COMPILER, *args)
             assert result.returncode == 2, (args, result.stdout, result.returncode)
         print('PASS invalid CLI commands and dialects')
-    print(f'{len(cases) + len(errors) + 17} checks passed')
+    print(f'{len(cases) + len(errors) + 26} checks passed')
 
 
 if __name__ == '__main__':

@@ -937,33 +937,31 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
         b[at..at + 8].copy_from_slice(&v.to_le_bytes());
     }
     let data_raw_size = data.len().next_multiple_of(0x200);
-    let mut b = vec![0; 0x10800 + data_raw_size];
+    let reloc_raw = 0x10800 + data_raw_size;
+    let reloc_rva = (RDATA + data.len() as u32).next_multiple_of(0x1000);
+    let mut b = vec![0; reloc_raw + 0x200];
     b[..2].copy_from_slice(b"MZ");
     dword(&mut b, 0x3c, 0x80);
     b[0x80..0x84].copy_from_slice(b"PE\0\0");
     word(&mut b, 0x84, 0x8664);
-    word(&mut b, 0x86, 3);
+    word(&mut b, 0x86, 4);
     word(&mut b, 0x94, 0xf0);
-    word(&mut b, 0x96, 0x23);
+    word(&mut b, 0x96, 0x22); // Executable, large-address aware; relocations retained.
     let o = 0x98;
     word(&mut b, o, 0x20b);
     dword(&mut b, o + 4, 0x10000);
-    dword(&mut b, o + 8, (0x400 + data_raw_size) as u32);
+    dword(&mut b, o + 8, (0x600 + data_raw_size) as u32);
     dword(&mut b, o + 0x10, TEXT);
     dword(&mut b, o + 0x14, TEXT);
-    qword(&mut b, o + 0x18, 0x400000);
+    qword(&mut b, o + 0x18, 0x140000000);
     dword(&mut b, o + 0x20, 0x1000);
     dword(&mut b, o + 0x24, 0x200);
     word(&mut b, o + 0x28, 6);
     word(&mut b, o + 0x30, 6);
-    dword(
-        &mut b,
-        o + 0x38,
-        (RDATA + data.len() as u32).next_multiple_of(0x1000),
-    );
+    dword(&mut b, o + 0x38, reloc_rva + 0x1000);
     dword(&mut b, o + 0x3c, 0x400);
     word(&mut b, o + 0x44, 3);
-    word(&mut b, o + 0x46, 0x100);
+    word(&mut b, o + 0x46, 0x160); // NX, DynamicBase, HighEntropyVA.
     for (at, v) in [
         (0x48, 0x100000),
         (0x50, 0x1000),
@@ -975,6 +973,8 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
     dword(&mut b, o + 0x6c, 16);
     dword(&mut b, o + 0x78, IMPORTS);
     dword(&mut b, o + 0x7c, 40);
+    dword(&mut b, o + 0x98, reloc_rva);
+    dword(&mut b, o + 0x9c, 12);
     dword(&mut b, o + 0xd0, IMPORTS + 0x40);
     dword(&mut b, o + 0xd4, 32);
     for (i, name, rva, raw, size, flags) in [
@@ -988,13 +988,25 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
             data_raw_size as u32,
             0x40000040,
         ),
+        (
+            3,
+            b".reloc\0\0",
+            reloc_rva,
+            reloc_raw as u32,
+            0x200,
+            0x42000040,
+        ),
     ] {
         let at = 0x188 + i * 40;
         b[at..at + 8].copy_from_slice(name);
         dword(
             &mut b,
             at + 8,
-            if i == 2 { data.len() as u32 } else { size },
+            match i {
+                2 => data.len() as u32,
+                3 => 12,
+                _ => size,
+            },
         );
         dword(&mut b, at + 12, rva);
         dword(&mut b, at + 16, size);
@@ -1003,6 +1015,12 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
     }
     b[0x400..0x400 + code.len()].copy_from_slice(code);
     b[0x10800..0x10800 + data.len()].copy_from_slice(data);
+    // All code/data references are RIP-relative or RVAs, so there are no
+    // absolute addresses to fix. A valid block of ABSOLUTE padding entries
+    // lets the loader rebase the position-independent image, including when
+    // mandatory ASLR requires a relocation directory.
+    dword(&mut b, reloc_raw, TEXT);
+    dword(&mut b, reloc_raw + 4, 12);
     let i = 0x10400;
     dword(&mut b, i, IMPORTS + 0x40);
     dword(&mut b, i + 12, IMPORTS + 0x70);

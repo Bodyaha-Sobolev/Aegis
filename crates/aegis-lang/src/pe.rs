@@ -102,6 +102,9 @@ impl Image {
     pub fn dynamic_base(&self) -> bool {
         self.dll_characteristics & 0x40 != 0
     }
+    pub fn high_entropy_va(&self) -> bool {
+        self.bits == 64 && self.dll_characteristics & 0x20 != 0
+    }
     pub fn cfg_declared(&self) -> bool {
         self.dll_characteristics & 0x4000 != 0
     }
@@ -128,9 +131,10 @@ impl fmt::Display for Image {
         )?;
         writeln!(
             f,
-            "Header flags: NX-compatible={} DynamicBase={} CFG={}",
+            "Header flags: NX-compatible={} DynamicBase={} HighEntropyVA={} CFG={}",
             self.nx_compatible(),
             self.dynamic_base(),
+            self.high_entropy_va(),
             self.cfg_declared()
         )?;
         writeln!(

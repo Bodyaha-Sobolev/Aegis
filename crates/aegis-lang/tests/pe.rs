@@ -11,9 +11,10 @@ fn inspects_native_compiler_output_without_mutating_it() {
     assert_eq!(build.executable, original);
     assert_eq!(image.bits, 64);
     assert_eq!(image.architecture(), "x64");
-    assert_eq!(image.sections.len(), 3);
+    assert_eq!(image.sections.len(), 4);
     assert!(image.nx_compatible());
-    assert!(!image.dynamic_base());
+    assert!(image.dynamic_base());
+    assert!(image.relocations_declared);
     assert!(!image.sections[2].writable());
     assert!(!image.sections[2].executable());
     assert_eq!(image.imports[0].name, "KERNEL32.DLL");

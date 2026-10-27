@@ -89,6 +89,7 @@ impl Inspector {
                         ui.add_space(12.0);
                         ui.label(format!("NX-compatible flag: {}", image.nx_compatible()));
                         ui.label(format!("DynamicBase flag: {} · relocation directory: {}", image.dynamic_base(), image.relocations_declared));
+                        ui.label(format!("HighEntropyVA flag (PE64): {}", image.high_entropy_va()));
                         ui.label(format!("CFG flag: {}", image.cfg_declared()));
                         ui.label(format!("Certificate directory: {} · signature has not been verified", image.certificate_declared));
                         for warning in &image.warnings { ui.colored_label(Color32::from_rgb(235, 189, 124), warning); }
