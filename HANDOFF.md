@@ -210,6 +210,15 @@ GitHub: https://github.com/Bodyaha-Sobolev/Aegis, origin подключён; и�
 не запрашивать его повторно для обычных обновлений проекта. Писать понятные
 описания фактических изменений, без шаблонных приписок и выдуманного авторства.
 Локальные ключи, пользовательские образцы и секреты не публиковать.
+Первый код опубликован коммитом 1f47d34 в main; GitHub подтвердил автора и
+committer Bodyaha-Sobolev. CI этого коммита завершился success:
+https://github.com/Bodyaha-Sobolev/Aegis/actions/runs/40462938257.
+Первый prerelease: https://github.com/Bodyaha-Sobolev/Aegis/releases/tag/v0.2.0-alpha.1,
+IDE/CLI и SHA256SUMS.txt загружены, GitHub digests совпали с локальными SHA-256.
+Локальная ветка codex/initial-import отслеживает origin/main; для разрешённых
+обновлений явно указывать `git push origin HEAD:main`, без force. Новые отдельные
+ветки создавать с префиксом codex/. Перед публикацией опираться на актуальный
+git status, историю и проверки, а не только этот снимок документации.
 CI: .github/workflows/ci.yml, Windows, pinned checkout/upload-artifact,
 Rust 1.96.1, build.cmd test и release, артефакт с двумя EXE. Настоящая GUI-smoke
 проверка пока локальная, на облачном runner наличие OpenGL не предполагается.

@@ -6,6 +6,7 @@
 Обязательной ВМ и браузерной оболочки нет.
 
 Исходники и обновления: [Bodyaha-Sobolev/Aegis](https://github.com/Bodyaha-Sobolev/Aegis).
+Скачать IDE и CLI: [Aegis 0.2, ранняя версия](https://github.com/Bodyaha-Sobolev/Aegis/releases/tag/v0.2.0-alpha.1).
 Windows CI запускает проверки и собирает IDE/CLI; готовые EXE доступны в
 артефакте `aegis-windows-x64` успешной сборки.
 
