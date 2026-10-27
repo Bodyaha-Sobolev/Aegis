@@ -1,0 +1,13 @@
+// Pack a version, flags and a sequence into a 64-bit value.
+fn pack(version, flags, sequence) {
+    return ((version & 0xFF) << 56) | ((flags & 0xFF) << 48) | (sequence & 0xFFFFFFFFFFFF);
+}
+
+fn main() {
+    let packet = pack(3, 0b1010, 42);
+    printi(packet >>> 56);             // 3
+    printi((packet >>> 48) & 0xFF);    // 10
+    printi(packet & 0xFFFFFFFFFFFF);  // 42
+    printi((0b1010 ^ 0b0011) & ~0b1000); // 1
+    return 0;
+}

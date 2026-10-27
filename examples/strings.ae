@@ -1,0 +1,20 @@
+fn title(enabled: bool) -> str {
+    if (enabled) { return "Aegis"; }
+    return "Привет";
+}
+
+fn greet(name: str) {
+    print("Hello, ");
+    println(name);
+}
+
+fn main() -> i64 {
+    let names: [str; 3] = ["Aegis", "Rust", "C++"];
+    greet(title(true));
+    println(names[0]);
+    printi(len("Привет")); // 12 UTF-8 bytes.
+    printi("Aegis"[0]);    // 65, the first byte.
+    printi(title(false) == "\u{41F}ривет");
+    println("UTF-8: \u{1F642}");
+    return 0;
+}

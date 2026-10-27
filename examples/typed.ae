@@ -1,0 +1,20 @@
+fn maximum(a: u64, b: u64) -> u64 {
+    if (a > b) { return a; }
+    return b;
+}
+
+fn enabled(flags: u64, mask: u64) -> bool {
+    return (flags & mask) != 0;
+}
+
+fn main() -> i64 {
+    let top: u64 = 0xFFFFFFFFFFFFFFFF;
+    printi(maximum(top, 42)); // 18446744073709551615
+    printi(top / 10);        // unsigned division
+    printi(top >> 63);       // logical right shift for u64
+    let ready: bool = enabled(0b1010, 0b0010);
+    printi(ready);           // 1
+    printi(i64(top));        // explicit bit-preserving conversion: -1
+    printi(bool(42));        // explicit truth conversion: 1
+    return 0;
+}

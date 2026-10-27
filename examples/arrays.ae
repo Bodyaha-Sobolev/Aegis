@@ -1,0 +1,24 @@
+fn main() -> i64 {
+    let events: [i64; 6] = [8, 3, 5, 1, 9, 2];
+    let original = events; // An independent value copy.
+    let i = 0;
+    while (i < len(events)) {
+        let j = 0;
+        while (j + 1 < len(events) - i) {
+            if (events[j] > events[j + 1]) {
+                let previous = events[j];
+                events[j] = events[j + 1];
+                events[j + 1] = previous;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < len(events)) {
+        printi(events[i]);
+        i = i + 1;
+    }
+    printi(original[0]); // Still 8.
+    return 0;
+}

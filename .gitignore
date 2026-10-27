@@ -1,0 +1,19 @@
+*.exe
+*.tmp
+__pycache__/
+/key.bin
+/t3key.bin
+/target/
+/artifacts/
+/.env
+/.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+# Original local samples and protected files are not project sources.
+/h.ae
+/henc.aeg
+/t3.ae
+/t3out.aeg
+/t3rest.ae

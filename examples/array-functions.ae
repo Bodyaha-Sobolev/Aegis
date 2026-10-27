@@ -1,0 +1,19 @@
+fn sum(values: [i64; 6]) -> i64 {
+    let total = 0;
+    let i = 0;
+    while (i < len(values)) {
+        total = total + values[i];
+        i = i + 1;
+    }
+    // This changes only the parameter's own value.
+    values[0] = 999;
+    return total;
+}
+
+fn main() -> i64 {
+    let events = [8, 3, 5, 1, 9, 2];
+    printi(sum(events));             // 28
+    printi(events[0]);               // 8
+    printi(sum([1, 2, 3, 4, 5, 6])); // 21
+    return 0;
+}

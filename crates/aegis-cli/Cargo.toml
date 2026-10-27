@@ -1,0 +1,12 @@
+[package]
+name = "aegis-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aegis-lang.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

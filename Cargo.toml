@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/aegis-lang", "crates/aegis-cli", "crates/aegis-studio"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.96"
+
+[workspace.dependencies]
+aegis-lang = { path = "crates/aegis-lang" }
+tempfile = "3.23"
+zeroize = "1.8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
