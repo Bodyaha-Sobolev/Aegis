@@ -1,0 +1,29 @@
+struct Actor {
+    name: str,
+    position: Position,
+    history: [i64; 4],
+}
+struct Position { x: i64, y: i64 }
+fn sum(values: [i64; 4]) {
+    return values[0] + values[1] + values[2] + values[3];
+}
+fn report(actor: Actor) {
+    println(actor.name);
+    printi(actor.position.x * actor.position.x + actor.position.y * actor.position.y);
+    printi(sum(actor.history));
+    actor.position.x = 99; // The caller keeps its copy.
+}
+fn main() {
+    let actor = Actor {
+        history: [2; 4],
+        position: Position { x: 3, y: 4 },
+        name: "player",
+    };
+    report(actor);
+    actor.history = [actor.position.x; 4];
+    let moved = actor;
+    moved.position.x = 5;
+    report(moved);
+    printi(actor.position.x);
+    printi(len(actor.history));
+}

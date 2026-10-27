@@ -242,60 +242,86 @@ impl Generator<'_> {
         self.slots = slots;
         Ok(())
     }
+    fn snapshot_store(&mut self, end: usize, offset: usize) {
+        self.bytes(&[0x48, 0x89, 0x84, 0x24]);
+        self.dword(((self.stack - end + offset) * 8) as u32);
+    }
+    fn write_snapshot(
+        &mut self,
+        value: &Expr,
+        end: usize,
+        offset: usize,
+    ) -> Result<(), Diagnostic> {
+        match &value.kind {
+            ExprKind::Record(record, fields) => {
+                for (name, value) in fields {
+                    let field_offset: usize = record
+                        .fields
+                        .iter()
+                        .take_while(|(field, _)| field != name)
+                        .map(|(_, ty)| ty.slots())
+                        .sum();
+                    self.write_snapshot(value, end, offset + field_offset)?;
+                }
+            }
+            ExprKind::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    self.write_snapshot(value, end, offset + index)?;
+                }
+            }
+            ExprKind::Repeat(value, count) => {
+                self.expr(value)?;
+                for index in 0..*count {
+                    self.snapshot_store(end, offset + index);
+                }
+            }
+            _ => {
+                self.expr(value)?;
+                if value.ty.aggregate() {
+                    self.bytes(&[0x48, 0x89, 0xc1]);
+                    for index in 0..value.ty.slots() {
+                        self.bytes(&[0x48, 0x8b, 0x81]);
+                        self.dword((index * 8) as u32);
+                        self.snapshot_store(end, offset + index);
+                    }
+                } else {
+                    self.snapshot_store(end, offset);
+                }
+            }
+        }
+        Ok(())
+    }
+    fn snapshot(&mut self, value: &Expr) -> Result<(), Diagnostic> {
+        // Touch each slot while growing the stack. All RHS evaluations finish
+        // before the caller copies the snapshot to a possibly overlapping place.
+        self.bytes(&[0x31, 0xc0]);
+        for _ in 0..value.ty.slots() {
+            self.push();
+        }
+        self.write_snapshot(value, self.stack, 0)
+    }
     fn store_aggregate(&mut self, slot: usize, value: &Expr) -> Result<(), Diagnostic> {
-        let len = value.ty.slots();
-        if let ExprKind::Record(record, fields) = &value.kind {
-            for (_, value) in fields {
-                self.expr(value)?;
-                self.push();
-            }
-            for (name, _) in fields.iter().rev() {
-                let index = record
-                    .fields
-                    .iter()
-                    .position(|(field, _)| field == name)
-                    .expect("checked field");
-                self.pop(&[0x58]);
-                self.local(0x89, slot + len - 1 - index);
-            }
-        } else if let ExprKind::Repeat(value, count) = &value.kind {
-            self.expr(value)?;
-            for index in 0..*count {
-                self.local(0x89, slot + index);
-            }
-        } else if let ExprKind::Array(values) = &value.kind {
-            // Snapshot every RHS before any target write (a = [a[1], a[0]]).
-            for value in values {
-                self.expr(value)?;
-                self.push();
-            }
-            for index in (0..len).rev() {
-                self.pop(&[0x58]);
-                self.local(0x89, slot + len - 1 - index);
-            }
-        } else {
-            self.expr(value)?;
-            self.bytes(&[0x48, 0x89, 0xc1]);
-            for index in 0..len {
-                self.bytes(&[0x48, 0x8b, 0x81]);
-                self.dword((index * 8) as u32);
-                self.local(0x89, slot + len - 1 - index);
-            }
+        self.snapshot(value)?;
+        for index in 0..value.ty.slots() {
+            self.pop(&[0x58]);
+            self.local(0x89, slot + value.ty.slots() - 1 - index);
         }
         Ok(())
     }
     fn index_address(&mut self, target: &Expr) -> Result<(), Diagnostic> {
         if let ExprKind::Field(base, name) = &target.kind {
-            let (ExprKind::Var(variable), Type::Record(record)) = (&base.kind, &base.ty) else {
-                return Err(self.error(&target.span, "field access requires a named struct"));
+            let Type::Record(record) = &base.ty else {
+                return Err(self.error(&target.span, "field access requires a struct"));
             };
-            let index = record
+            let offset: usize = record
                 .fields
                 .iter()
-                .position(|(field, _)| field == name)
-                .ok_or_else(|| self.error(&target.span, "unknown struct field"))?;
-            let slot = self.variable(variable, &base.span)?;
-            self.local(0x8d, slot + record.fields.len() - 1 - index);
+                .take_while(|(field, _)| field != name)
+                .map(|(_, ty)| ty.slots())
+                .sum();
+            self.expr(base)?;
+            self.bytes(&[0x48, 0x05]);
+            self.dword((offset * 8) as u32);
             return Ok(());
         }
         let ExprKind::Index(array, index) = &target.kind else {
@@ -313,19 +339,16 @@ impl Generator<'_> {
             self.bytes(&[0x48, 0x8d, 0x44, 0x01, 0x08]);
             return Ok(());
         }
-        let ExprKind::Var(name) = &array.kind else {
-            return Err(self.error(&array.span, "expected named array"));
-        };
-        let slot = self.variable(name, &array.span)?;
         let len = array.ty.slots();
+        self.expr(array)?;
+        self.push();
         self.expr(index)?;
         self.bytes(&[0x48, 0x3d]);
         self.dword(len as u32);
         let in_bounds = self.jump(Some(0x82));
         self.exit(72);
         self.here(in_bounds);
-        self.bytes(&[0x48, 0x8d, 0x8d]);
-        self.dword((-(8 * (slot + len) as i32)) as u32);
+        self.pop(&[0x59]);
         self.bytes(&[0x48, 0x8d, 0x04, 0xc1]);
         Ok(())
     }
@@ -351,9 +374,21 @@ impl Generator<'_> {
             StmtKind::IndexAssign(target, value) => {
                 self.index_address(target)?;
                 self.push();
-                self.expr(value)?;
-                self.pop(&[0x59]);
-                self.bytes(&[0x48, 0x89, 0x01]);
+                if value.ty.aggregate() {
+                    self.snapshot(value)?;
+                    self.bytes(&[0x48, 0x8b, 0x8c, 0x24]);
+                    self.dword((value.ty.slots() * 8) as u32);
+                    for index in 0..value.ty.slots() {
+                        self.pop(&[0x58]);
+                        self.bytes(&[0x48, 0x89, 0x81]);
+                        self.dword((index * 8) as u32);
+                    }
+                    self.pop(&[0x5a]);
+                } else {
+                    self.expr(value)?;
+                    self.pop(&[0x59]);
+                    self.bytes(&[0x48, 0x89, 0x01]);
+                }
             }
             StmtKind::Expr(expr) => self.expr(expr)?,
             StmtKind::Return(expr) => {
@@ -456,7 +491,9 @@ impl Generator<'_> {
             }
             ExprKind::Field(..) => {
                 self.index_address(expr)?;
-                self.bytes(&[0x48, 0x8b, 0x00]);
+                if !expr.ty.aggregate() {
+                    self.bytes(&[0x48, 0x8b, 0x00]);
+                }
             }
             ExprKind::Index(base, _) => {
                 self.index_address(expr)?;
@@ -519,57 +556,7 @@ impl Generator<'_> {
                 let aggregates = args.iter().any(|arg| arg.ty.aggregate());
                 for arg in args {
                     if arg.ty.aggregate() {
-                        if let ExprKind::Record(record, fields) = &arg.kind {
-                            // Reserve the entire snapshot before evaluating fields. Nested
-                            // calls cannot overwrite it; stack accounting keeps ABI alignment.
-                            // Touch each slot while growing the stack instead of
-                            // skipping a guard page with a large subtraction.
-                            self.bytes(&[0x31, 0xc0]);
-                            for _ in &record.fields {
-                                self.push();
-                            }
-                            for (name, value) in fields {
-                                self.expr(value)?;
-                                let index = record
-                                    .fields
-                                    .iter()
-                                    .position(|(field, _)| field == name)
-                                    .expect("checked field");
-                                self.bytes(&[0x48, 0x89, 0x84, 0x24]);
-                                self.dword((index * 8) as u32);
-                            }
-                        } else if let ExprKind::Repeat(value, count) = &arg.kind {
-                            self.expr(value)?;
-                            for _ in 0..*count {
-                                self.push();
-                            }
-                        } else if let ExprKind::Array(values) = &arg.kind {
-                            for value in values {
-                                self.expr(value)?;
-                                self.push();
-                            }
-                            // Evaluation is left-to-right; reverse the snapshot
-                            // in place so element zero has the lowest address.
-                            for element in 0..values.len() / 2 {
-                                let other = values.len() - 1 - element;
-                                self.bytes(&[0x48, 0x8b, 0x84, 0x24]);
-                                self.dword((element * 8) as u32);
-                                self.bytes(&[0x4c, 0x8b, 0x94, 0x24]);
-                                self.dword((other * 8) as u32);
-                                self.bytes(&[0x4c, 0x89, 0x94, 0x24]);
-                                self.dword((element * 8) as u32);
-                                self.bytes(&[0x48, 0x89, 0x84, 0x24]);
-                                self.dword((other * 8) as u32);
-                            }
-                        } else {
-                            self.expr(arg)?;
-                            self.bytes(&[0x49, 0x89, 0xc2]);
-                            for element in (0..arg.ty.slots()).rev() {
-                                self.bytes(&[0x49, 0x8b, 0x82]);
-                                self.dword((element * 8) as u32);
-                                self.push();
-                            }
-                        }
+                        self.snapshot(arg)?;
                         self.bytes(&[0x48, 0x89, 0xe0]);
                     } else {
                         self.expr(arg)?;

@@ -59,6 +59,17 @@ def main():
     record_values = ','.join(f'f{i}:{i}' for i in reversed(range(256)))
     cases.append(('struct_full_layout', 'struct P {'+record_fields+'} fn main() { let p=P {'+record_values+'}; printi(p.f0); printi(p.f255); p.f255=42; printi(p.f255); }', b'0\n255\n42\n', 0))
     cases.append(('struct_full_argument', 'struct P {'+record_fields+'} fn f(p:P) { printi(p.f0); printi(p.f255); p.f255=42; printi(p.f255); } fn main() { f(P {'+record_values+'}); }', b'0\n255\n42\n', 0))
+    cases.extend([
+        ('nested_struct_copy', 'struct E { p:P, n:i64 } struct P { x:i64,y:i64 } fn main() { let a=E { n:7,p:P { x:2,y:3 } }; let b=a; b.p.x=9; printi(a.p.x); printi(b.p.x); a.p=b.p; printi(a.p.x); a.p=P { y:a.p.x,x:a.p.y }; printi(a.p.x); printi(a.p.y); printi(a.n); }', b'2\n9\n9\n3\n9\n7\n', 0),
+        ('nested_struct_argument', 'struct E { p:P, a:[i64;3] } struct P { x:i64,y:i64 } fn f(e:E) { printi(e.p.x+e.p.y+e.a[2]); e.p.x=99; e.a[0]=88; } fn main() { let e=E { a:[4;3],p:P { y:2,x:1 } }; f(e); printi(e.p.x); printi(e.a[0]); f(E { p:e.p,a:e.a }); }', b'7\n1\n4\n7\n', 0),
+        ('array_field_swap', 'struct E { a:[i64;3], b:[i64;3] } fn main() { let e=E { a:[1,2,3], b:[4;3] }; e.a=[e.a[2],e.a[1],e.a[0]]; printi(e.a[0]); printi(e.a[2]); e.b=e.a; e.a[0]=99; printi(e.b[0]); printi(len(e.a)); }', b'3\n1\n3\n3\n', 0),
+        ('array_field_arguments', 'struct E { a:[i64;3] } fn f(a:[i64;3]) { printi(a[0]+a[2]); a[0]=99; } fn main() { let e=E { a:[5;3] }; f(e.a); printi(e.a[0]); }', b'10\n5\n', 0),
+        ('nested_evaluation_order', 'struct P { a:i64,b:i64 } struct E { p:P,v:[i64;2],c:i64 } fn seed(n) { printi(n); return n; } fn f(e:E,n) { printi(e.p.a+e.p.b+e.v[0]+e.v[1]+e.c+n); } fn main() { f(E { v:[seed(1),seed(2)],p:P { b:seed(3),a:seed(4) },c:seed(5) },seed(6)); }', b'1\n2\n3\n4\n5\n6\n21\n', 0),
+        ('nested_string_fields', 'struct P { s:str } struct E { p:P,names:[str;2],bits:[u64;2] } fn main() { let e=E { bits:[0xffffffffffffffff;2], names:["one","two"], p:P { s:"hi" } }; println(e.p.s); printi(e.p.s[1]); println(e.names[1]); printi(e.bits[0]); e.p.s="changed"; println(e.p.s); }', b'hi\n105\ntwo\n18446744073709551615\nchanged\n', 0),
+        ('array_field_bounds', 'struct E { a:[i64;2] } fn main() { let e=E { a:[1;2] }; printi(e.a[-1]); }', b'', 72),
+        ('array_field_check_order', 'struct E { a:[i64;2] } fn seed() { printi(99); return 1; } fn main() { let e=E { a:[1;2] }; e.a[2]=seed(); }', b'', 72),
+        ('nested_full_frame', 'struct P { a:[i64;128] } struct E { left:P,right:P } fn f(e:E) { printi(e.left.a[127]); printi(e.right.a[127]); } fn main() { let e=E { right:P { a:[2;128] },left:P { a:[1;128] } }; f(e); e.left=e.right; printi(e.left.a[127]); }', b'1\n2\n2\n', 0),
+    ])
     errors = [
         ('empty_binary', 'fn main() { return 0b; }', b'integer literal'),
         ('bad_binary', 'fn main() { return 0b102; }', b'ERROR'),

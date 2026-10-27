@@ -23,17 +23,9 @@ pub(crate) enum Scalar {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Record {
     pub name: String,
-    pub fields: Vec<(String, Scalar)>,
-}
-impl Scalar {
-    pub fn ty(self) -> Type {
-        match self {
-            Self::I64 => Type::I64,
-            Self::U64 => Type::U64,
-            Self::Bool => Type::Bool,
-            Self::Str => Type::Str,
-        }
-    }
+    pub fields: Vec<(String, Type)>,
+    pub slots: usize,
+    pub depth: usize,
 }
 impl Type {
     pub fn aggregate(&self) -> bool {
@@ -64,7 +56,7 @@ impl Type {
         if let Self::Array(_, len) = self {
             *len
         } else if let Self::Record(record) = self {
-            record.fields.len()
+            record.slots
         } else {
             1
         }
@@ -178,6 +170,14 @@ pub(crate) enum ExprKind {
     Binary(&'static str, Box<Expr>, Box<Expr>),
 }
 
+pub(crate) fn is_place(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Var(_) => true,
+        ExprKind::Field(base, _) => is_place(base),
+        _ => false,
+    }
+}
+
 pub fn analyze(source: &str) -> Result<Vec<FunctionInfo>, Diagnostic> {
     let program = parse(source, lexer::lex(source)?)?;
     // Include semantic/code-generation checks so the IDE reports the same errors as CLI.
@@ -192,6 +192,8 @@ pub(crate) fn parse(source: &str, tokens: Vec<Token>) -> Result<Program, Diagnos
         at: 0,
         depth: 0,
         records: HashMap::new(),
+        pending_records: HashMap::new(),
+        resolving_records: Vec::new(),
     }
     .program()?;
     crate::semantics::check(source, &mut program)?;
@@ -203,6 +205,8 @@ struct Parser<'a> {
     at: usize,
     depth: usize,
     records: HashMap<String, Arc<Record>>,
+    pending_records: HashMap<String, usize>,
+    resolving_records: Vec<String>,
 }
 impl Parser<'_> {
     fn token(&self) -> &Token {
@@ -263,14 +267,7 @@ impl Parser<'_> {
         if self.token().kind == Kind::Ident {
             let span = self.token().span.clone();
             let name = self.name()?;
-            return self
-                .records
-                .get(&name)
-                .cloned()
-                .map(Type::Record)
-                .ok_or_else(|| {
-                    Diagnostic::new(self.source, span, format!("unknown type: {name}"))
-                });
+            return self.resolve_record(&name, span).map(Type::Record);
         }
         let ty = match self.token().kind {
             Kind::Keyword(Keyword::I64) => Type::I64,
@@ -300,14 +297,7 @@ impl Parser<'_> {
                 return Err(self.error(format!("field already defined: {field}")));
             }
             self.expect(":")?;
-            let ty = match self.token().kind {
-                Kind::Keyword(Keyword::I64) => Scalar::I64,
-                Kind::Keyword(Keyword::U64) => Scalar::U64,
-                Kind::Keyword(Keyword::Bool) => Scalar::Bool,
-                Kind::Keyword(Keyword::Str) => Scalar::Str,
-                _ => return Err(self.error("struct fields must be i64, u64, bool or str")),
-            };
-            self.at += 1;
+            let ty = self.type_name()?;
             fields.push((field, ty));
             if fields.len() > 256 {
                 return Err(self.error("struct field limit exceeded (256)"));
@@ -320,20 +310,84 @@ impl Parser<'_> {
         if fields.is_empty() {
             return Err(self.error("struct must have at least one field"));
         }
-        Ok(Arc::new(Record { name, fields }))
+        let slots: usize = fields.iter().map(|(_, ty)| ty.slots()).sum();
+        if slots > 256 {
+            return Err(self.error("struct layout limit exceeded (256 slots)"));
+        }
+        let depth = fields
+            .iter()
+            .map(|(_, ty)| match ty {
+                Type::Record(record) => record.depth,
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        if depth > 32 {
+            return Err(self.error("struct nesting limit exceeded (32)"));
+        }
+        Ok(Arc::new(Record {
+            name,
+            fields,
+            slots,
+            depth,
+        }))
     }
-    // Gather top-level layouts before parsing functions, allowing forward references.
+    fn resolve_record(
+        &mut self,
+        name: &str,
+        span: Range<usize>,
+    ) -> Result<Arc<Record>, Diagnostic> {
+        if let Some(record) = self.records.get(name) {
+            return Ok(record.clone());
+        }
+        let Some(&start) = self.pending_records.get(name) else {
+            return Err(Diagnostic::new(
+                self.source,
+                span,
+                format!("unknown type: {name}"),
+            ));
+        };
+        if self.resolving_records.iter().any(|active| active == name) {
+            return Err(Diagnostic::new(
+                self.source,
+                span,
+                format!("cyclic struct layout: {name}"),
+            ));
+        }
+        if self.resolving_records.len() >= 32 {
+            return Err(Diagnostic::new(
+                self.source,
+                span,
+                "struct nesting limit exceeded (32)",
+            ));
+        }
+        let saved = self.at;
+        self.at = start;
+        self.resolving_records.push(name.to_owned());
+        let record = self.record_definition()?;
+        self.resolving_records.pop();
+        self.at = saved;
+        self.records.insert(name.to_owned(), record.clone());
+        Ok(record)
+    }
+    // Collect declaration locations first, then resolve the bounded acyclic layouts.
     fn collect_records(&mut self) -> Result<(), Diagnostic> {
         let mut braces = 0usize;
+        let mut names = Vec::new();
         while self.token().kind != Kind::Eof {
             if braces == 0 && self.kw(Keyword::Struct) {
-                let record = self.record_definition()?;
-                if self.records.insert(record.name.clone(), record).is_some() {
+                let start = self.at;
+                let name = self.name()?;
+                if self.pending_records.insert(name.clone(), start).is_some() {
                     return Err(self.error("struct already defined"));
                 }
-                if self.records.len() > 128 {
+                names.push(name);
+                if names.len() > 128 {
                     return Err(self.error("struct limit exceeded (128)"));
                 }
+                self.expect("{")?;
+                braces = 1;
             } else {
                 match self.token().kind {
                     Kind::Sym("{") => braces += 1,
@@ -342,6 +396,9 @@ impl Parser<'_> {
                 }
                 self.at += 1;
             }
+        }
+        for name in names {
+            self.resolve_record(&name, 0..0)?;
         }
         self.at = 0;
         Ok(())

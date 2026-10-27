@@ -2,7 +2,7 @@
 use crate::{
     Diagnostic,
     lexer::Keyword,
-    parser::{Expr, ExprKind, Program, Stmt, StmtKind, Type},
+    parser::{Expr, ExprKind, Program, Stmt, StmtKind, Type, is_place},
 };
 use std::{collections::HashMap, ops::Range};
 
@@ -87,7 +87,7 @@ impl Checker<'_> {
                     {
                         return Err(self.error(&target.span, "string bytes are immutable"));
                     }
-                    self.expr(value, Some(ty))?;
+                    self.aggregate_value(value, Some(ty))?;
                 }
                 StmtKind::Return(value) => {
                     self.expr(value, Some(self.result.clone()))?;
@@ -152,7 +152,7 @@ impl Checker<'_> {
                         format!("unknown field {name} in {}", record.name),
                     ));
                 };
-                self.scalar(value, Some(field_type.ty()))?;
+                self.aggregate_value(value, Some(field_type.clone()))?;
             }
             if fields.len() != record.fields.len() {
                 return Err(self.error(
@@ -236,7 +236,7 @@ impl Checker<'_> {
                     .fields
                     .iter()
                     .find(|(field, _)| field == name)
-                    .map(|(_, ty)| ty.ty()),
+                    .map(|(_, ty)| ty.clone()),
                 _ => None,
             },
             ExprKind::Index(target, _) => match self.hint(target) {
@@ -277,7 +277,7 @@ impl Checker<'_> {
             }
             ExprKind::Field(base, name) => {
                 let ty = self.expr(base, None)?;
-                if !matches!(base.kind, ExprKind::Var(_)) {
+                if !is_place(base) {
                     return Err(self.error(&base.span, "field access requires a named struct"));
                 }
                 let Type::Record(record) = ty else {
@@ -287,7 +287,7 @@ impl Checker<'_> {
                     .fields
                     .iter()
                     .find(|(field, _)| field == name)
-                    .map(|(_, ty)| ty.ty())
+                    .map(|(_, ty)| ty.clone())
                     .ok_or_else(|| {
                         self.error(
                             &expr.span,
@@ -297,9 +297,7 @@ impl Checker<'_> {
             }
             ExprKind::Len(value) => {
                 let ty = self.expr(value, None)?;
-                if ty != Type::Str
-                    && (ty.element().is_none() || !matches!(value.kind, ExprKind::Var(_)))
-                {
+                if ty != Type::Str && (ty.element().is_none() || !is_place(value)) {
                     return Err(self.error(&value.span, "len requires a string or named array"));
                 }
                 Type::I64
@@ -309,7 +307,7 @@ impl Checker<'_> {
                 let element = if ty == Type::Str {
                     Type::U64
                 } else {
-                    if !matches!(target.kind, ExprKind::Var(_)) {
+                    if !is_place(target) {
                         return Err(
                             self.error(&target.span, "indexing requires a named array or string")
                         );
