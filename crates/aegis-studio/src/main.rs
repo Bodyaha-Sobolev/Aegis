@@ -610,10 +610,10 @@ impl Studio {
         // optionally captures that window's own rendered frame, without input.
         if let Some(frames) = &mut self.smoke_frames {
             *frames += 1;
-            if *frames == 4 && self.screenshot.is_some() {
+            if *frames == 16 && self.screenshot.is_some() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
             }
-            if *frames >= 20 {
+            if *frames >= 40 {
                 self.allow_exit = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
