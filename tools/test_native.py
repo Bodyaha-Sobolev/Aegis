@@ -36,6 +36,16 @@ def main():
         ('division_zero', 'fn main() { return 1/0; }', b'', 70),
         ('division_overflow', 'fn main() { return -9223372036854775808/-1; }', b'', 71),
     ]
+    cases.extend([
+        ('repeat_once', 'fn seed() { printi(7); return 42; } fn main() { let a=[seed();4]; printi(a[0]); printi(a[3]); }', b'7\n42\n42\n', 0),
+        ('repeat_assignment_snapshot', 'fn main() { let a=[1,2,3]; a=[a[0]+a[2];3]; printi(a[0]); printi(a[1]); printi(a[2]); }', b'4\n4\n4\n', 0),
+        ('repeat_argument_once', 'fn seed() { printi(1); return 9; } fn f(a:[i64;3],b) { printi(a[0]); printi(a[2]); printi(b); } fn main() { f([seed();3],seed()); }', b'1\n1\n9\n9\n9\n', 0),
+        ('repeat_full_frame', 'fn main() { let a=[13;256]; printi(a[0]); printi(a[255]); printi(len(a)); }', b'13\n13\n256\n', 0),
+        ('repeat_full_argument', 'fn f(a:[i64;256]) { printi(a[0]); printi(a[255]); a[0]=99; printi(a[0]); } fn main() { f([17;256]); }', b'17\n17\n99\n', 0),
+        ('repeat_types', 'fn f(a:[str;2],b:[u64;2],c:[bool;2]) { println(a[1]); printi(b[1]); printi(c[1]); } fn main() { f(["ok";2],[0xffffffffffffffff;2],[true;2]); }', b'ok\n18446744073709551615\n1\n', 0),
+        ('repeat_fault', 'fn main() { let a=[1/0;8]; printi(a[0]); }', b'', 70),
+        ('repeat_bounds', 'fn main() { let a=[42;2]; printi(a[2]); }', b'', 72),
+    ])
     errors = [
         ('empty_binary', 'fn main() { return 0b; }', b'integer literal'),
         ('bad_binary', 'fn main() { return 0b102; }', b'ERROR'),

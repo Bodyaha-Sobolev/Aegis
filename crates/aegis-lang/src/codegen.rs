@@ -244,7 +244,12 @@ impl Generator<'_> {
     }
     fn store_array(&mut self, slot: usize, value: &Expr) -> Result<(), Diagnostic> {
         let len = value.ty.slots();
-        if let ExprKind::Array(values) = &value.kind {
+        if let ExprKind::Repeat(value, count) = &value.kind {
+            self.expr(value)?;
+            for index in 0..*count {
+                self.local(0x89, slot + index);
+            }
+        } else if let ExprKind::Array(values) = &value.kind {
             // Snapshot every RHS before any target write (a = [a[1], a[0]]).
             for value in values {
                 self.expr(value)?;
@@ -419,7 +424,7 @@ impl Generator<'_> {
                 self.bytes(&[0x48, 0xb8]);
                 self.bytes(&n.to_le_bytes());
             }
-            ExprKind::Array(_) => {
+            ExprKind::Array(_) | ExprKind::Repeat(..) => {
                 return Err(self.error(&expr.span, "array literal requires local storage"));
             }
             ExprKind::Index(base, _) => {
@@ -483,7 +488,12 @@ impl Generator<'_> {
                 let arrays = args.iter().any(|arg| arg.ty.element().is_some());
                 for arg in args {
                     if arg.ty.element().is_some() {
-                        if let ExprKind::Array(values) = &arg.kind {
+                        if let ExprKind::Repeat(value, count) = &arg.kind {
+                            self.expr(value)?;
+                            for _ in 0..*count {
+                                self.push();
+                            }
+                        } else if let ExprKind::Array(values) = &arg.kind {
                             for value in values {
                                 self.expr(value)?;
                                 self.push();

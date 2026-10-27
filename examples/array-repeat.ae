@@ -1,0 +1,21 @@
+// A fixed buffer, filled from one evaluation.
+fn seed() {
+    println("seed evaluated once");
+    return 7;
+}
+fn sum(values: [i64; 8]) {
+    let total = 0;
+    let index = 0;
+    while (index < len(values)) {
+        total = total + values[index];
+        index = index + 1;
+    }
+    return total;
+}
+fn main() {
+    let values = [seed(); 8];
+    printi(sum(values));
+    values = [values[0] + 1; 8];
+    printi(sum(values));
+    printi(sum([2; 8]));
+}

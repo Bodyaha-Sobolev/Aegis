@@ -123,6 +123,23 @@ impl Checker<'_> {
         Ok(ty)
     }
     fn array_value(&mut self, expr: &mut Expr, expected: Option<Type>) -> Result<Type, Diagnostic> {
+        if let ExprKind::Repeat(value, count) = &mut expr.kind {
+            if expected.is_some_and(|ty| ty.element().is_none()) {
+                return Err(self.error(&expr.span, "type mismatch: expected scalar, found array"));
+            }
+            let element = self.scalar(value, expected.and_then(Type::element))?;
+            let ty = Type::array(element, *count).expect("scalar array element");
+            if let Some(expected) = expected
+                && expected != ty
+            {
+                return Err(self.error(
+                    &expr.span,
+                    format!("type mismatch: expected {expected}, found {ty}"),
+                ));
+            }
+            expr.ty = ty;
+            return Ok(ty);
+        }
         if let ExprKind::Array(values) = &mut expr.kind {
             if values.is_empty() {
                 return Err(self.error(&expr.span, "empty arrays are not supported yet"));
@@ -171,7 +188,7 @@ impl Checker<'_> {
             ExprKind::Number(_) => None,
             ExprKind::Bool(_) => Some(Type::Bool),
             ExprKind::String(_) => Some(Type::Str),
-            ExprKind::Array(_) => None,
+            ExprKind::Array(_) | ExprKind::Repeat(..) => None,
             ExprKind::Index(target, _) => match self.hint(target) {
                 Some(Type::Str) => Some(Type::U64),
                 other => other.and_then(Type::element),
@@ -199,7 +216,7 @@ impl Checker<'_> {
         let ty = match &mut expr.kind {
             ExprKind::String(_) => Type::Str,
             ExprKind::Number(_) => expected.filter(|t| t.integer()).unwrap_or(Type::I64),
-            ExprKind::Array(_) => {
+            ExprKind::Array(_) | ExprKind::Repeat(..) => {
                 return Err(self.error(
                     &expr.span,
                     "array literals require a local declaration, whole-array assignment or array argument",

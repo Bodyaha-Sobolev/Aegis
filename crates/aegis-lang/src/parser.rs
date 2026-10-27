@@ -142,6 +142,7 @@ pub(crate) enum ExprKind {
     Bool(bool),
     String(String),
     Array(Vec<Expr>),
+    Repeat(Box<Expr>, usize),
     Index(Box<Expr>, Box<Expr>),
     Len(Box<Expr>),
     Cast(Type, Box<Expr>),
@@ -477,23 +478,38 @@ impl Parser<'_> {
             }
             Kind::Sym("[") => {
                 self.at += 1;
-                let mut values = Vec::new();
-                if !self.sym("]") {
-                    loop {
-                        values.push(self.expr(1)?);
-                        if values.len() > 256 {
-                            return Err(self.error("array literal limit exceeded (256 elements)"));
+                if self.sym("]") {
+                    ExprKind::Array(Vec::new())
+                } else {
+                    let first = self.expr(1)?;
+                    if self.sym(";") {
+                        let Kind::Number(count) = self.token().kind else {
+                            return Err(self
+                                .error("array repeat length must be an integer literal (1..256)"));
+                        };
+                        if !(1..=256).contains(&count) {
+                            return Err(self.error("array repeat length must be in 1..256"));
                         }
-                        if self.sym("]") {
-                            break;
+                        self.at += 1;
+                        self.expect("]")?;
+                        ExprKind::Repeat(Box::new(first), count as usize)
+                    } else {
+                        let mut values = vec![first];
+                        while !self.sym("]") {
+                            self.expect(",")?;
+                            if self.sym("]") {
+                                break;
+                            }
+                            values.push(self.expr(1)?);
+                            if values.len() > 256 {
+                                return Err(
+                                    self.error("array literal limit exceeded (256 elements)")
+                                );
+                            }
                         }
-                        self.expect(",")?;
-                        if self.sym("]") {
-                            break;
-                        }
+                        ExprKind::Array(values)
                     }
                 }
-                ExprKind::Array(values)
             }
             Kind::Keyword(Keyword::Len) => {
                 self.at += 1;
@@ -553,7 +569,10 @@ impl Parser<'_> {
         };
         self.depth -= 1;
         let depth = match &kind {
-            ExprKind::Unary(_, e) | ExprKind::Cast(_, e) | ExprKind::Len(e) => e.depth + 1,
+            ExprKind::Unary(_, e)
+            | ExprKind::Cast(_, e)
+            | ExprKind::Len(e)
+            | ExprKind::Repeat(e, _) => e.depth + 1,
             ExprKind::Call(_, args) | ExprKind::Array(args) => {
                 args.iter().map(|e| e.depth).max().unwrap_or(0) + 1
             }

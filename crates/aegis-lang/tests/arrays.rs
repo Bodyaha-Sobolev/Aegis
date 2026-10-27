@@ -64,3 +64,37 @@ fn array_slots_obey_function_storage_limit() {
     ))
     .expect("disjoint scopes reuse storage");
 }
+
+#[test]
+fn repeat_arrays_use_context_and_obey_limits() {
+    for source in [
+        "fn main() { let a=[0;256]; printi(a[255]); }",
+        "fn main() { let a:[u64;3]=[0xffffffffffffffff;3]; }",
+        "fn main() { let a=[true;3]; a=[false;3]; }",
+        "fn main() { let a=[\"hello\";3]; println(a[2]); }",
+        "fn f(a:[u64;3]) {} fn main() { f([1;3]); }",
+        "fn main() { let a=[1;3]; a=[a[2]+1;3]; }",
+    ] {
+        compile(source).expect(source);
+    }
+    for source in [
+        "fn main() { let a=[0;0]; }",
+        "fn main() { let a=[0;257]; }",
+        "fn main() { let a=[0;-1]; }",
+        "fn main() { let a=[0;1+1]; }",
+        "fn main() { let a=[0;18446744073709551615]; }",
+        "fn main() { let a=[[1];2]; }",
+        "fn main() { let a:[bool;2]=[1;2]; }",
+        "fn main() { let a:[i64;3]=[1;2]; }",
+        "fn main() { let a=[1;256]; let b=2; }",
+        "fn main() { printi([1;2]); }",
+        "fn f(a:[str;2]) {} fn main() { f([true;2]); }",
+        "fn main() { let a=[false;2]; a=[1;2]; }",
+        "fn main() { let a=[true;2]; a=[false;3]; }",
+    ] {
+        assert_eq!(
+            compile(source).expect_err(source),
+            analyze(source).expect_err(source)
+        );
+    }
+}
