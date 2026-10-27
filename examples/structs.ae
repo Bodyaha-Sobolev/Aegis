@@ -1,0 +1,26 @@
+struct Entity {
+    name: str,
+    x: i64,
+    y: i64,
+    flags: u64,
+    active: bool,
+}
+fn distance_squared(entity: Entity) -> i64 {
+    return entity.x * entity.x + entity.y * entity.y;
+}
+fn report(entity: Entity) {
+    println(entity.name);
+    printi(distance_squared(entity));
+    entity.x = 99; // The caller keeps its original value.
+}
+fn main() {
+    let player = Entity { x: 3, y: 4, name: "player", flags: 0b101, active: true };
+    report(player);
+    let moved = player;
+    moved.x = moved.x + 2;
+    report(moved);
+    printi(player.x);
+    if (player.active && (player.flags & 1) != 0) {
+        println("ready");
+    }
+}

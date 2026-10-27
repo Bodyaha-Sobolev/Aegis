@@ -4,6 +4,7 @@ use std::ops::Range;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Keyword {
     Fn,
+    Struct,
     Let,
     Return,
     If,
@@ -44,6 +45,7 @@ pub(crate) struct Token {
 fn keyword(word: &str) -> Option<Keyword> {
     Some(match word {
         "fn" => Keyword::Fn,
+        "struct" => Keyword::Struct,
         "let" => Keyword::Let,
         "return" => Keyword::Return,
         "if" => Keyword::If,
@@ -146,7 +148,7 @@ fn scan(source: &str) -> Vec<Token> {
             let symbol = [
                 "[", "]", ">>>", "<<", ">>", "->", ":", "==", "!=", "<=", ">=", "&&", "||", "(",
                 ")", "{", "}", ";", ",", "+", "-", "*", "/", "%", "=", "!", "<", ">", "&", "|",
-                "^", "~",
+                "^", "~", ".",
             ]
             .into_iter()
             .find(|s| source[at..].starts_with(s));

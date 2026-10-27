@@ -47,7 +47,7 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
         g.bytes(&[0x55, 0x48, 0x89, 0xe5, 0x48, 0x81, 0xec]);
         let frame = g.hole();
         for (i, param) in function.params.iter().enumerate() {
-            let slot = g.declare(&param.name, param.ty, &function.span)?;
+            let slot = g.declare(&param.name, param.ty.clone(), &function.span)?;
             if i >= 4 {
                 // RBP points to the saved frame pointer, followed by return
                 // address, four shadow slots, then the fifth argument.
@@ -66,10 +66,10 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
             );
             g.dword((-(8 * (slot as i32 + 1))) as u32);
         }
-        // All incoming registers must be saved before any array copy uses RCX.
-        // Array parameters receive caller snapshots, then own independent slots.
+        // All incoming registers must be saved before any aggregate copy uses RCX.
+        // Aggregate parameters receive caller snapshots, then own independent slots.
         for param in &function.params {
-            if param.ty.element().is_some() {
+            if param.ty.aggregate() {
                 let slot = g.variable(&param.name, &function.span)?;
                 g.local(0x8b, slot);
                 g.bytes(&[0x48, 0x89, 0xc1]);
@@ -242,9 +242,23 @@ impl Generator<'_> {
         self.slots = slots;
         Ok(())
     }
-    fn store_array(&mut self, slot: usize, value: &Expr) -> Result<(), Diagnostic> {
+    fn store_aggregate(&mut self, slot: usize, value: &Expr) -> Result<(), Diagnostic> {
         let len = value.ty.slots();
-        if let ExprKind::Repeat(value, count) = &value.kind {
+        if let ExprKind::Record(record, fields) = &value.kind {
+            for (_, value) in fields {
+                self.expr(value)?;
+                self.push();
+            }
+            for (name, _) in fields.iter().rev() {
+                let index = record
+                    .fields
+                    .iter()
+                    .position(|(field, _)| field == name)
+                    .expect("checked field");
+                self.pop(&[0x58]);
+                self.local(0x89, slot + len - 1 - index);
+            }
+        } else if let ExprKind::Repeat(value, count) = &value.kind {
             self.expr(value)?;
             for index in 0..*count {
                 self.local(0x89, slot + index);
@@ -271,6 +285,19 @@ impl Generator<'_> {
         Ok(())
     }
     fn index_address(&mut self, target: &Expr) -> Result<(), Diagnostic> {
+        if let ExprKind::Field(base, name) = &target.kind {
+            let (ExprKind::Var(variable), Type::Record(record)) = (&base.kind, &base.ty) else {
+                return Err(self.error(&target.span, "field access requires a named struct"));
+            };
+            let index = record
+                .fields
+                .iter()
+                .position(|(field, _)| field == name)
+                .ok_or_else(|| self.error(&target.span, "unknown struct field"))?;
+            let slot = self.variable(variable, &base.span)?;
+            self.local(0x8d, slot + record.fields.len() - 1 - index);
+            return Ok(());
+        }
         let ExprKind::Index(array, index) = &target.kind else {
             return Err(self.error(&target.span, "expected array element"));
         };
@@ -305,18 +332,18 @@ impl Generator<'_> {
     fn statement(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match &stmt.kind {
             StmtKind::Let(name, _, value) => {
-                if value.ty.element().is_some() {
-                    let slot = self.declare(name, value.ty, &stmt.span)?;
-                    return self.store_array(slot, value);
+                if value.ty.aggregate() {
+                    let slot = self.declare(name, value.ty.clone(), &stmt.span)?;
+                    return self.store_aggregate(slot, value);
                 }
                 self.expr(value)?;
-                let slot = self.declare(name, value.ty, &stmt.span)?;
+                let slot = self.declare(name, value.ty.clone(), &stmt.span)?;
                 self.local(0x89, slot);
             }
             StmtKind::Assign(name, value) => {
                 let slot = self.variable(name, &stmt.span)?;
-                if value.ty.element().is_some() {
-                    return self.store_array(slot, value);
+                if value.ty.aggregate() {
+                    return self.store_aggregate(slot, value);
                 }
                 self.expr(value)?;
                 self.local(0x89, slot);
@@ -424,8 +451,12 @@ impl Generator<'_> {
                 self.bytes(&[0x48, 0xb8]);
                 self.bytes(&n.to_le_bytes());
             }
-            ExprKind::Array(_) | ExprKind::Repeat(..) => {
-                return Err(self.error(&expr.span, "array literal requires local storage"));
+            ExprKind::Array(_) | ExprKind::Repeat(..) | ExprKind::Record(..) => {
+                return Err(self.error(&expr.span, "aggregate literal requires local storage"));
+            }
+            ExprKind::Field(..) => {
+                self.index_address(expr)?;
+                self.bytes(&[0x48, 0x8b, 0x00]);
             }
             ExprKind::Index(base, _) => {
                 self.index_address(expr)?;
@@ -456,7 +487,7 @@ impl Generator<'_> {
             }
             ExprKind::Var(name) => {
                 let slot = self.variable(name, &expr.span)?;
-                if expr.ty.element().is_some() {
+                if expr.ty.aggregate() {
                     self.local(0x8d, slot + expr.ty.slots() - 1);
                 } else {
                     self.local(0x8b, slot);
@@ -485,10 +516,29 @@ impl Generator<'_> {
                 }
                 let initial_stack = self.stack;
                 let mut locations = Vec::with_capacity(args.len());
-                let arrays = args.iter().any(|arg| arg.ty.element().is_some());
+                let aggregates = args.iter().any(|arg| arg.ty.aggregate());
                 for arg in args {
-                    if arg.ty.element().is_some() {
-                        if let ExprKind::Repeat(value, count) = &arg.kind {
+                    if arg.ty.aggregate() {
+                        if let ExprKind::Record(record, fields) = &arg.kind {
+                            // Reserve the entire snapshot before evaluating fields. Nested
+                            // calls cannot overwrite it; stack accounting keeps ABI alignment.
+                            // Touch each slot while growing the stack instead of
+                            // skipping a guard page with a large subtraction.
+                            self.bytes(&[0x31, 0xc0]);
+                            for _ in &record.fields {
+                                self.push();
+                            }
+                            for (name, value) in fields {
+                                self.expr(value)?;
+                                let index = record
+                                    .fields
+                                    .iter()
+                                    .position(|(field, _)| field == name)
+                                    .expect("checked field");
+                                self.bytes(&[0x48, 0x89, 0x84, 0x24]);
+                                self.dword((index * 8) as u32);
+                            }
+                        } else if let ExprKind::Repeat(value, count) = &arg.kind {
                             self.expr(value)?;
                             for _ in 0..*count {
                                 self.push();
@@ -527,7 +577,7 @@ impl Generator<'_> {
                     self.push();
                     locations.push(self.stack);
                 }
-                if args.len() > 4 || arrays {
+                if args.len() > 4 || aggregates {
                     // Preserve evaluated arguments above a separate outgoing
                     // call area. Nested calls cannot overwrite these values.
                     let base = 32 + args.len().saturating_sub(4) * 8;

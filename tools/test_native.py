@@ -46,6 +46,19 @@ def main():
         ('repeat_fault', 'fn main() { let a=[1/0;8]; printi(a[0]); }', b'', 70),
         ('repeat_bounds', 'fn main() { let a=[42;2]; printi(a[2]); }', b'', 72),
     ])
+    cases.extend([
+        ('struct_copy', 'struct P { x:i64,y:i64 } fn main() { let a=P { x:2,y:3 }; let b=a; b.x=9; printi(a.x); printi(b.x); a=b; printi(a.x); a=P { y:a.x,x:a.y }; printi(a.x); printi(a.y); }', b'2\n9\n9\n3\n9\n', 0),
+        ('struct_argument', 'struct P { x:i64,y:i64 } fn f(p:P) { printi(p.x); p.x=99; printi(p.x); } fn main() { let a=P { x:7,y:8 }; f(a); printi(a.x); f(P { y:2,x:1 }); }', b'7\n99\n7\n1\n99\n', 0),
+        ('struct_order', 'struct P { x:i64,y:i64 } fn seed(n) { printi(n); return n; } fn f(p:P,n) { printi(p.x); printi(p.y); printi(n); } fn main() { f(P { y:seed(2),x:seed(1) },seed(3)); }', b'2\n1\n3\n1\n2\n3\n', 0),
+        ('struct_types', 'struct P { name:str, mask:u64, active:bool } fn f(p:P)->u64 { println(p.name); printi(p.active); return p.mask; } fn main() { let p=P { mask:0xffffffffffffffff, active:true, name:"hero" }; printi(f(p)); p.name="new"; println(p.name); printi(p.name[1]); }', b'hero\n1\n18446744073709551615\nnew\n101\n', 0),
+        ('struct_stack_args', 'struct P { x:i64,y:i64 } fn f(a,b,c,d,p:P,q:P,t:[i64;2]) { printi(a+b+c+d+p.x+p.y+q.x+q.y+t[0]+t[1]); p.x=99; } fn main() { let p=P { x:5,y:6 }; f(1,2,3,4,p,P { y:8,x:7 },[9,10]); printi(p.x); }', b'55\n5\n', 0),
+        ('struct_recursive', 'struct P { x:i64,y:i64 } fn sum(p:P,n) { if(n==0) { return p.x+p.y; } p.x=p.x+1; return sum(p,n-1); } fn main() { let p=P { x:1,y:2 }; printi(sum(p,8)); printi(p.x); }', b'11\n1\n', 0),
+        ('struct_single', 'struct P { x:i64 } fn f(p:P,a,b,c,d) { printi(p.x+a+b+c+d); p.x=99; } fn main() { let p=P { x:1 }; f(p,2,3,4,5); printi(p.x); }', b'15\n1\n', 0),
+    ])
+    record_fields = ','.join(f'f{i}:i64' for i in range(256))
+    record_values = ','.join(f'f{i}:{i}' for i in reversed(range(256)))
+    cases.append(('struct_full_layout', 'struct P {'+record_fields+'} fn main() { let p=P {'+record_values+'}; printi(p.f0); printi(p.f255); p.f255=42; printi(p.f255); }', b'0\n255\n42\n', 0))
+    cases.append(('struct_full_argument', 'struct P {'+record_fields+'} fn f(p:P) { printi(p.f0); printi(p.f255); p.f255=42; printi(p.f255); } fn main() { f(P {'+record_values+'}); }', b'0\n255\n42\n', 0))
     errors = [
         ('empty_binary', 'fn main() { return 0b; }', b'integer literal'),
         ('bad_binary', 'fn main() { return 0b102; }', b'ERROR'),
@@ -163,7 +176,7 @@ def main():
         ('mixed_sign', 'fn main() { let x:u64=1; let y:i64=1; printi(x+y); }', b'type mismatch'),
         ('return_bool_as_int', 'fn main() { return true; }', b'type mismatch'),
         ('typed_call', 'fn f(x:bool) {} fn main() { f(1); }', b'type mismatch'),
-        ('unknown_type', 'fn main() { let x:float=1; }', b'expected type'),
+        ('unknown_type', 'fn main() { let x:float=1; }', b'unknown type: float'),
     ])
     cases.extend([
         ('array_functions', (ROOT/'examples'/'array-functions.ae').read_text(encoding='utf-8'), b'28\n8\n21\n', 0),

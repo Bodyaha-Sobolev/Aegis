@@ -2,15 +2,16 @@ use crate::{
     Diagnostic,
     lexer::{self, Keyword, Kind, Token},
 };
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Type {
     I64,
     U64,
     Bool,
     Str,
     Array(Scalar, usize),
+    Record(Arc<Record>),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scalar {
@@ -19,7 +20,25 @@ pub(crate) enum Scalar {
     Bool,
     Str,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Record {
+    pub name: String,
+    pub fields: Vec<(String, Scalar)>,
+}
+impl Scalar {
+    pub fn ty(self) -> Type {
+        match self {
+            Self::I64 => Type::I64,
+            Self::U64 => Type::U64,
+            Self::Bool => Type::Bool,
+            Self::Str => Type::Str,
+        }
+    }
+}
 impl Type {
+    pub fn aggregate(&self) -> bool {
+        matches!(self, Self::Array(..) | Self::Record(_))
+    }
     pub fn array(element: Self, len: usize) -> Option<Self> {
         Some(Self::Array(
             match element {
@@ -27,12 +46,12 @@ impl Type {
                 Self::U64 => Scalar::U64,
                 Self::Bool => Scalar::Bool,
                 Self::Str => Scalar::Str,
-                Self::Array(..) => return None,
+                Self::Array(..) | Self::Record(_) => return None,
             },
             len,
         ))
     }
-    pub fn element(self) -> Option<Self> {
+    pub fn element(&self) -> Option<Self> {
         match self {
             Self::Array(Scalar::I64, _) => Some(Self::I64),
             Self::Array(Scalar::U64, _) => Some(Self::U64),
@@ -41,19 +60,24 @@ impl Type {
             _ => None,
         }
     }
-    pub fn slots(self) -> usize {
+    pub fn slots(&self) -> usize {
         if let Self::Array(_, len) = self {
-            len
+            *len
+        } else if let Self::Record(record) = self {
+            record.fields.len()
         } else {
             1
         }
     }
-    pub fn integer(self) -> bool {
+    pub fn integer(&self) -> bool {
         matches!(self, Self::I64 | Self::U64)
     }
 }
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::Record(record) = self {
+            return f.write_str(&record.name);
+        }
         if let Self::Array(_, len) = self {
             return write!(f, "[{}; {len}]", self.element().expect("array element"));
         }
@@ -62,7 +86,7 @@ impl std::fmt::Display for Type {
             Self::U64 => "u64",
             Self::Bool => "bool",
             Self::Str => "str",
-            Self::Array(..) => unreachable!(),
+            Self::Array(..) | Self::Record(_) => unreachable!(),
         })
     }
 }
@@ -143,6 +167,8 @@ pub(crate) enum ExprKind {
     String(String),
     Array(Vec<Expr>),
     Repeat(Box<Expr>, usize),
+    Record(Arc<Record>, Vec<(String, Expr)>),
+    Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Len(Box<Expr>),
     Cast(Type, Box<Expr>),
@@ -165,6 +191,7 @@ pub(crate) fn parse(source: &str, tokens: Vec<Token>) -> Result<Program, Diagnos
         tokens,
         at: 0,
         depth: 0,
+        records: HashMap::new(),
     }
     .program()?;
     crate::semantics::check(source, &mut program)?;
@@ -175,6 +202,7 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     at: usize,
     depth: usize,
+    records: HashMap<String, Arc<Record>>,
 }
 impl Parser<'_> {
     fn token(&self) -> &Token {
@@ -232,6 +260,18 @@ impl Parser<'_> {
             self.expect("]")?;
             return Ok(Type::array(element, len as usize).expect("scalar element"));
         }
+        if self.token().kind == Kind::Ident {
+            let span = self.token().span.clone();
+            let name = self.name()?;
+            return self
+                .records
+                .get(&name)
+                .cloned()
+                .map(Type::Record)
+                .ok_or_else(|| {
+                    Diagnostic::new(self.source, span, format!("unknown type: {name}"))
+                });
+        }
         let ty = match self.token().kind {
             Kind::Keyword(Keyword::I64) => Type::I64,
             Kind::Keyword(Keyword::U64) => Type::U64,
@@ -250,9 +290,70 @@ impl Parser<'_> {
             Ok(())
         }
     }
+    fn record_definition(&mut self) -> Result<Arc<Record>, Diagnostic> {
+        let name = self.name()?;
+        self.expect("{")?;
+        let mut fields = Vec::new();
+        while !self.sym("}") {
+            let field = self.name()?;
+            if fields.iter().any(|(name, _)| name == &field) {
+                return Err(self.error(format!("field already defined: {field}")));
+            }
+            self.expect(":")?;
+            let ty = match self.token().kind {
+                Kind::Keyword(Keyword::I64) => Scalar::I64,
+                Kind::Keyword(Keyword::U64) => Scalar::U64,
+                Kind::Keyword(Keyword::Bool) => Scalar::Bool,
+                Kind::Keyword(Keyword::Str) => Scalar::Str,
+                _ => return Err(self.error("struct fields must be i64, u64, bool or str")),
+            };
+            self.at += 1;
+            fields.push((field, ty));
+            if fields.len() > 256 {
+                return Err(self.error("struct field limit exceeded (256)"));
+            }
+            if self.sym("}") {
+                break;
+            }
+            self.expect(",")?;
+        }
+        if fields.is_empty() {
+            return Err(self.error("struct must have at least one field"));
+        }
+        Ok(Arc::new(Record { name, fields }))
+    }
+    // Gather top-level layouts before parsing functions, allowing forward references.
+    fn collect_records(&mut self) -> Result<(), Diagnostic> {
+        let mut braces = 0usize;
+        while self.token().kind != Kind::Eof {
+            if braces == 0 && self.kw(Keyword::Struct) {
+                let record = self.record_definition()?;
+                if self.records.insert(record.name.clone(), record).is_some() {
+                    return Err(self.error("struct already defined"));
+                }
+                if self.records.len() > 128 {
+                    return Err(self.error("struct limit exceeded (128)"));
+                }
+            } else {
+                match self.token().kind {
+                    Kind::Sym("{") => braces += 1,
+                    Kind::Sym("}") => braces = braces.saturating_sub(1),
+                    _ => {}
+                }
+                self.at += 1;
+            }
+        }
+        self.at = 0;
+        Ok(())
+    }
     fn program(mut self) -> Result<Program, Diagnostic> {
+        self.collect_records()?;
         let mut functions: Vec<Function> = Vec::new();
         while self.token().kind != Kind::Eof {
+            if self.kw(Keyword::Struct) {
+                self.record_definition()?;
+                continue;
+            }
             let start = self.token().span.start;
             if !self.kw(Keyword::Fn) {
                 return Err(self.error("expected function definition"));
@@ -290,8 +391,9 @@ impl Parser<'_> {
                 Type::I64
             };
             let body = self.block()?;
-            if result.element().is_some() {
-                return Err(self.error("array return values are not supported yet"));
+            if result.aggregate() {
+                return Err(self
+                    .error("array return values and struct return values are not supported yet"));
             }
             functions.push(Function {
                 name,
@@ -397,7 +499,7 @@ impl Parser<'_> {
         } else {
             let value = self.expr(1)?;
             if self.sym("=") {
-                if !matches!(value.kind, ExprKind::Index(..)) {
+                if !matches!(value.kind, ExprKind::Index(..) | ExprKind::Field(..)) {
                     return Err(self.error("assignment target must be a variable or array element"));
                 }
                 StmtKind::IndexAssign(value, self.expr(1)?)
@@ -450,7 +552,25 @@ impl Parser<'_> {
     }
     fn atom(&mut self) -> Result<Expr, Diagnostic> {
         let mut value = self.primary()?;
-        while self.sym("[") {
+        loop {
+            if self.sym(".") {
+                let field = self.name()?;
+                let depth = value.depth + 1;
+                if depth > 96 {
+                    return Err(self.error("expression tree depth limit exceeded"));
+                }
+                let span = value.span.start..self.tokens[self.at - 1].span.end;
+                value = Expr {
+                    kind: ExprKind::Field(Box::new(value), field),
+                    span,
+                    depth,
+                    ty: Type::I64,
+                };
+                continue;
+            }
+            if !self.sym("[") {
+                break;
+            }
             let index = self.expr(1)?;
             self.expect("]")?;
             let depth = value.depth.max(index.depth) + 1;
@@ -535,7 +655,24 @@ impl Parser<'_> {
             }
             Kind::Ident => {
                 let name = self.name()?;
-                if self.sym("(") {
+                if let Some(record) = self.records.get(&name).cloned()
+                    && self.sym("{")
+                {
+                    let mut fields = Vec::new();
+                    while !self.sym("}") {
+                        let field = self.name()?;
+                        self.expect(":")?;
+                        fields.push((field, self.expr(1)?));
+                        if fields.len() > 256 {
+                            return Err(self.error("struct initializer field limit exceeded (256)"));
+                        }
+                        if self.sym("}") {
+                            break;
+                        }
+                        self.expect(",")?;
+                    }
+                    ExprKind::Record(record, fields)
+                } else if self.sym("(") {
                     let mut args = Vec::new();
                     if !self.sym(")") {
                         loop {
@@ -573,6 +710,10 @@ impl Parser<'_> {
             | ExprKind::Cast(_, e)
             | ExprKind::Len(e)
             | ExprKind::Repeat(e, _) => e.depth + 1,
+            ExprKind::Field(e, _) => e.depth + 1,
+            ExprKind::Record(_, fields) => {
+                fields.iter().map(|(_, e)| e.depth).max().unwrap_or(0) + 1
+            }
             ExprKind::Call(_, args) | ExprKind::Array(args) => {
                 args.iter().map(|e| e.depth).max().unwrap_or(0) + 1
             }
