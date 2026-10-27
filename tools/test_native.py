@@ -612,6 +612,15 @@ def main():
         ('heap_concat_arrays', 'fn main() { let words: [str;3] = ["x", "y", "z"]; let joined = words[0] + words[1] + words[2]; println(joined); let a: [str;2] = [joined;2]; println(a[1] + "!"); printi(len(a[0])); }', b'xyz\nxyz!\n3\n', 0),
         ('heap_concat_branches', 'fn pick(flag: bool) -> str { if(flag) { return "yes" + "!"; } return "no"; } fn main() { println(pick(true)); println(pick(false)); let i = 0; while(i < 3) { println(pick(i % 2 == 1)); i = i + 1; } }', b'yes!\nno\nno\nyes!\nno\n', 0),
     ])
+    cases.extend([
+        ('heap_transfer_field', 'struct Named { label: str, id: i64 } fn main() { let n = Named { label: "first", id: 1 }; n.label = "second" + "!"; println(n.label); printi(n.id); n.label = "third"; println(n.label); }', b'second!\n1\nthird\n', 0),
+        ('heap_transfer_element', 'fn main() { let words: [str;2] = ["a", "b"]; words[0] = words[1] + "c"; println(words[0]); println(words[1]); words[1] = "z" + "z"; println(words[1]); }', b'bc\nb\nzz\n', 0),
+        ('heap_transfer_struct_value', 'struct Named { label: str, id: i64 } fn main() { let n = Named { label: "first", id: 1 }; n = Named { label: "second" + "!", id: 2 }; println(n.label); printi(n.id); }', b'second!\n2\n', 0),
+        ('heap_transfer_stress', 'struct Named { label: str, id: i64 } fn main() { let n = Named { label: "x", id: 0 }; let words: [str;2] = ["a", "b"]; let i = 0; while(i < 10000) { n.label = "s" + "t"; words[0] = "u" + "v"; i = i + 1; } printi(len(n.label)); println(words[0]); }', b'2\nuv\n', 0),
+        ('heap_break_continue', 'struct Named { label: str, id: i64 } fn main() { let n = Named { label: "x", id: 0 }; let words: [str;2] = ["a", "b"]; let i = 0; while(i < 5) { n.label = "s" + "t"; words[1] = "u" + "v"; if(i == 2) { break; } if(i == 0) { i = i + 1; continue; } i = i + 1; } printi(i); println(n.label); println(words[1]); }', b'2\nst\nuv\n', 0),
+        ('heap_transfer_aggregate_element', 'struct P { label: str, id: i64 } fn main() { let a: [P;2] = [P { label: "one", id: 1 };2]; a[1] = P { label: "two" + "!", id: 2 }; println(a[0].label); println(a[1].label); printi(a[1].id); }', b'one\ntwo!\n2\n', 0),
+    ])
+
     errors.extend([
         ('heap_str_strict_arith', 'fn main() { printi("a" + 1); }', b'type mismatch'),
         ('heap_str_strict_cmp_ord', 'fn main() { printi("a" < "b"); }', b'strings support only'),
