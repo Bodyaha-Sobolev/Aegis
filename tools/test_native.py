@@ -5,6 +5,7 @@ import stat
 import subprocess
 import tempfile
 from windows_aslr import run_relocated
+from pe_fixture import export_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = Path(os.environ.get('AEGIS_COMPILER', ROOT / 'target' / 'debug' / 'aegis-cli.exe'))
@@ -389,6 +390,22 @@ def main():
         report = run(COMPILER,'inspect',damaged)
         assert report.returncode == 2 and b'PE:' in report.stderr and not report.stdout
         print('PASS malformed PE rejected')
+        for bits in [32, 64]:
+            exported = folder/f'exports{bits}.dll'
+            fixture = export_fixture(bits)
+            exported.write_bytes(fixture)
+            report = run(COMPILER, 'inspect', exported)
+            assert report.returncode == 0, report.stderr
+            for expected in [f'PE{bits}'.encode(), b'Imports (1)', b'FIXTUREIMPORT.dll', b'external', b'Exports (4)', b'fixture.dll', b'ordinal #7', b'RVA 0x00002000', b'file 0xC00', b'alias', b'alpha', b'forwarder OTHER.#27', b'ordinal #10', b'no unique file mapping']:
+                assert expected in report.stdout, (bits, expected, report.stdout)
+            assert exported.read_bytes() == fixture
+            print('PASS read-only export metadata', bits)
+            fixture[0x544:0x546] = (5).to_bytes(2, 'little')
+            exported.write_bytes(fixture)
+            report = run(COMPILER, 'inspect', exported)
+            assert report.returncode == 2 and b'invalid address-table slot' in report.stderr and not report.stdout
+            assert exported.read_bytes() == fixture
+            print('PASS invalid export ordinal rejected', bits)
         for name, source, diagnostic in errors:
             src, exe = folder / (name+'.ae'), folder / (name+'.exe')
             src.write_text(source, encoding='utf-8')
@@ -443,7 +460,7 @@ def main():
             result = run(COMPILER, *args)
             assert result.returncode == 2, (args, result.stdout, result.returncode)
         print('PASS invalid CLI commands and dialects')
-    print(f'{len(cases) + len(errors) + 26} checks passed')
+    print(f'{len(cases) + len(errors) + 30} checks passed')
 
 
 if __name__ == '__main__':

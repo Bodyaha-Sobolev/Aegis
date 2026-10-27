@@ -99,6 +99,7 @@ struct Studio {
     navigation_focus: bool,
     navigation_selected: usize,
     smoke_frames: Option<u32>,
+    smoke_exports: bool,
     screenshot: Option<PathBuf>,
     inspector: Option<inspector::Inspector>,
     inspecting: bool,
@@ -138,6 +139,7 @@ impl Default for Studio {
             navigation_focus: false,
             navigation_selected: 0,
             smoke_frames: None,
+            smoke_exports: false,
             screenshot: None,
             inspector: None,
             inspecting: false,
@@ -173,6 +175,7 @@ impl Studio {
             app.screenshot = args.get(1).map(PathBuf::from);
             if let Some(path) = args.get(2) {
                 if args[0] == "--smoke-inspect" {
+                    app.smoke_exports = args.get(3).is_some_and(|s| s == "exports");
                     app.inspect_binary(PathBuf::from(path), cc.egui_ctx.clone());
                 } else {
                     app.open_path(PathBuf::from(path));
@@ -444,7 +447,11 @@ impl Studio {
                     self.inspecting = false;
                     match result {
                         Ok((image, bytes)) => {
-                            self.inspector = Some(inspector::Inspector::new(path, image, bytes));
+                            let mut inspector = inspector::Inspector::new(path, image, bytes);
+                            if self.smoke_exports {
+                                inspector.select_exports();
+                            }
+                            self.inspector = Some(inspector);
                             self.status = "Binary inspected · file not executed".into();
                         }
                         Err(error) => self.fail(error),

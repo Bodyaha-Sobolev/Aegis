@@ -9,6 +9,8 @@ pub struct Inspector {
     filter: String,
     bytes: Vec<u8>,
     offset: usize,
+    export_query: Option<String>,
+    export_rows: Vec<(usize, Option<usize>)>,
 }
 impl Inspector {
     pub fn new(path: PathBuf, image: pe::Image, bytes: Vec<u8>) -> Self {
@@ -19,6 +21,110 @@ impl Inspector {
             filter: String::new(),
             bytes,
             offset: 0,
+            export_query: None,
+            export_rows: Vec::new(),
+        }
+    }
+    pub fn select_exports(&mut self) {
+        self.selected = 4;
+    }
+    fn jump_to_bytes(&mut self, offset: usize) {
+        if offset < self.bytes.len() {
+            self.offset = offset;
+            self.selected = 3;
+        }
+    }
+    fn update_export_filter(&mut self) {
+        let query = self.filter.to_lowercase();
+        if self.export_query.as_ref() == Some(&query) {
+            return;
+        }
+        self.export_rows.clear();
+        let library_match = self
+            .image
+            .export_library
+            .as_ref()
+            .is_some_and(|name| !query.is_empty() && name.to_lowercase().contains(&query));
+        for (index, export) in self.image.exports.iter().enumerate() {
+            let common = query.is_empty()
+                || library_match
+                || export.ordinal.to_string().contains(&query)
+                || format!("0x{:x}", export.rva).contains(&query)
+                || export
+                    .forwarder
+                    .as_ref()
+                    .is_some_and(|f| f.to_lowercase().contains(&query));
+            if export.names.is_empty() {
+                if common {
+                    self.export_rows.push((index, None));
+                }
+            } else {
+                for (name_index, name) in export.names.iter().enumerate() {
+                    if common || name.to_lowercase().contains(&query) {
+                        self.export_rows.push((index, Some(name_index)));
+                    }
+                }
+            }
+        }
+        self.export_query = Some(query);
+    }
+    fn show_exports(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Filter name / ordinal / RVA / forwarder");
+            ui.text_edit_singleline(&mut self.filter);
+        });
+        self.update_export_filter();
+        ui.label(format!(
+            "{} · {} exports · {} matching rows",
+            self.image
+                .export_library
+                .as_deref()
+                .unwrap_or("No DLL name"),
+            self.image.exports.len(),
+            self.export_rows.len()
+        ));
+        ui.label("Ordinal · RVA · name · forwarder · file bytes. Exported addresses can denote code or data.");
+        if self.image.exports.is_empty() {
+            ui.label("No exports declared.");
+            return;
+        }
+        let height = ui.text_style_height(&egui::TextStyle::Monospace).max(22.0);
+        let mut jump = None;
+        egui::ScrollArea::both().id_salt("pe-exports").show_rows(
+            ui,
+            height,
+            self.export_rows.len(),
+            |ui, rows| {
+                for row in rows {
+                    let (index, name) = self.export_rows[row];
+                    let export = &self.image.exports[index];
+                    let name = name.map_or("(unnamed)", |n| export.names[n].as_str());
+                    ui.horizontal(|ui| {
+                        for (width, text) in [
+                            (65.0, format!("#{}", export.ordinal)),
+                            (110.0, format!("0x{:08X}", export.rva)),
+                            (260.0, name.to_owned()),
+                            (210.0, export.forwarder.as_deref().unwrap_or("—").to_owned()),
+                        ] {
+                            ui.add_sized(
+                                [width, height],
+                                egui::Label::new(RichText::new(&text).monospace()).truncate(),
+                            )
+                            .on_hover_text(text);
+                        }
+                        if let Some(offset) = export.file_offset {
+                            if ui.button(format!("File 0x{offset:X}")).clicked() {
+                                jump = Some(offset);
+                            }
+                        } else {
+                            ui.label("No unique file mapping");
+                        }
+                    });
+                }
+            },
+        );
+        if let Some(offset) = jump {
+            self.jump_to_bytes(offset);
         }
     }
     fn show_bytes(&mut self, ui: &mut egui::Ui) {
@@ -75,8 +181,8 @@ impl Inspector {
                 ui.label(RichText::new(self.path.display().to_string()).strong());
                 ui.label("Read-only file analysis · input was not executed · header flags are not a safety verdict");
                 ui.horizontal(|ui| {
-                    for (index, label) in ["Headers", "Sections", "Imports", "Bytes"].iter().enumerate() {
-                        ui.selectable_value(&mut self.selected, index, *label);
+                    for (index, label) in [(0,"Headers"), (1,"Sections"), (2,"Imports"), (4,"Exports"), (3,"Bytes")] {
+                        ui.selectable_value(&mut self.selected, index, label);
                     }
                     if ui.button("Copy report").clicked() { ui.ctx().copy_text(self.image.to_string()); }
                 });
@@ -109,6 +215,7 @@ impl Inspector {
                         });
                     }).inner,
                     3 => self.show_bytes(ui),
+                    4 => self.show_exports(ui),
                     _ => {
                         ui.horizontal(|ui| { ui.label("Filter"); ui.text_edit_singleline(&mut self.filter); });
                         let query = self.filter.to_lowercase();
@@ -167,7 +274,7 @@ mod tests {
         let image = pe::inspect(&bytes).expect("PE");
         let mut inspector = Inspector::new(PathBuf::from("sample.exe"), image, bytes);
         let ctx = egui::Context::default();
-        for selected in 0..4 {
+        for selected in 0..5 {
             inspector.selected = selected;
             inspector.filter = "write".into();
             let output = ctx.run(egui::RawInput::default(), |ctx| {
@@ -175,5 +282,57 @@ mod tests {
             });
             assert!(!output.shapes.is_empty());
         }
+    }
+    #[test]
+    fn export_filter_handles_aliases_and_navigation_preserves_the_snapshot() {
+        let bytes = aegis_lang::compile("fn main() {}").expect("PE").executable;
+        let mut image = pe::inspect(&bytes).expect("inspect");
+        image.export_library = Some("fixture.dll".into());
+        image.exports = vec![
+            pe::Export {
+                ordinal: 7,
+                names: vec!["Alpha".into(), "Alias".into()],
+                rva: 0x1000,
+                forwarder: None,
+                file_offset: Some(0x400),
+            },
+            pe::Export {
+                ordinal: 8,
+                names: vec![],
+                rva: 0x2000,
+                forwarder: Some("OTHER.#27".into()),
+                file_offset: None,
+            },
+        ];
+        let mut inspector = Inspector::new(PathBuf::from("fixture.dll"), image, bytes.clone());
+        for (query, expected) in [
+            ("", vec![(0, Some(0)), (0, Some(1)), (1, None)]),
+            ("alias", vec![(0, Some(1))]),
+            ("0x1000", vec![(0, Some(0)), (0, Some(1))]),
+            ("other", vec![(1, None)]),
+            ("8", vec![(1, None)]),
+            ("nothing", vec![]),
+        ] {
+            inspector.filter = query.into();
+            inspector.update_export_filter();
+            assert_eq!(inspector.export_rows, expected);
+            inspector.update_export_filter();
+            assert_eq!(inspector.export_rows, expected);
+        }
+        inspector.filter = "fixture".into();
+        inspector.select_exports();
+        let ctx = egui::Context::default();
+        assert!(
+            !ctx.run(egui::RawInput::default(), |ctx| {
+                assert!(inspector.show(ctx));
+            })
+            .shapes
+            .is_empty()
+        );
+        inspector.jump_to_bytes(0x400);
+        assert_eq!((inspector.selected, inspector.offset), (3, 0x400));
+        inspector.jump_to_bytes(usize::MAX);
+        assert_eq!(inspector.offset, 0x400);
+        assert_eq!(inspector.bytes, bytes);
     }
 }

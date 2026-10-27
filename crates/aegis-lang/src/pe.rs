@@ -6,6 +6,7 @@ pub const MAX_FILE: usize = 64 * 1024 * 1024;
 const MAX_SECTIONS: usize = 96;
 const MAX_LIBRARIES: usize = 128;
 const MAX_SYMBOLS: usize = 4096;
+const MAX_EXPORTS: usize = 65536;
 const MAX_NAME: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,16 @@ pub struct Library {
     pub name: String,
     pub symbols: Vec<Symbol>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    pub ordinal: u32,
+    pub names: Vec<String>,
+    pub rva: u32,
+    pub forwarder: Option<String>,
+    /// A unique, file-backed mapping only. None also covers virtual-only,
+    /// unmapped or ambiguous targets; an export need not denote executable code.
+    pub file_offset: Option<usize>,
+}
 #[derive(Debug, Clone)]
 pub struct Image {
     pub file_size: usize,
@@ -81,6 +92,8 @@ pub struct Image {
     pub certificate_declared: bool,
     pub sections: Vec<Section>,
     pub imports: Vec<Library>,
+    pub export_library: Option<String>,
+    pub exports: Vec<Export>,
     pub warnings: Vec<String>,
 }
 impl Image {
@@ -160,6 +173,37 @@ impl fmt::Display for Image {
             writeln!(f, "  {}", library.name)?;
             for symbol in &library.symbols {
                 writeln!(f, "    {symbol}")?;
+            }
+        }
+        writeln!(
+            f,
+            "\nExports ({}) {}",
+            self.exports.len(),
+            self.export_library.as_deref().unwrap_or("")
+        )?;
+        for export in &self.exports {
+            let location = if let Some(forwarder) = &export.forwarder {
+                format!("forwarder {forwarder}")
+            } else if let Some(offset) = export.file_offset {
+                format!("file 0x{offset:X}")
+            } else {
+                "no unique file mapping".into()
+            };
+            if export.names.is_empty() {
+                writeln!(
+                    f,
+                    "  ordinal #{} RVA 0x{:08X} {location} (unnamed)",
+                    export.ordinal, export.rva
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "  ordinal #{} RVA 0x{:08X} {location}",
+                    export.ordinal, export.rva
+                )?;
+                for name in &export.names {
+                    writeln!(f, "    {name}")?;
+                }
             }
         }
         for warning in &self.warnings {
@@ -242,7 +286,19 @@ impl Image {
                 result = Some(start..s.raw_offset as usize + s.raw_size as usize);
             }
         }
-        result.ok_or_else(|| Error(format!("unmapped RVA 0x{rva:X}")))
+        let mut range = result.ok_or_else(|| Error(format!("unmapped RVA 0x{rva:X}")))?;
+        // A read starting in a unique mapping must also stop before a later
+        // section starts overlapping it. Checking only the first RVA would
+        // otherwise let tables/names extend into ambiguous virtual addresses.
+        for section in &self.sections {
+            if section.virtual_size.max(section.raw_size) != 0 && section.rva > rva {
+                let until_section = (section.rva - rva) as usize;
+                if until_section < range.len() {
+                    range.end = range.start + until_section;
+                }
+            }
+        }
+        Ok(range)
     }
     fn rva_bytes<'a>(&self, reader: &Reader<'a>, rva: u32, len: usize) -> Result<&'a [u8]> {
         let range = self.mapped_range(rva)?;
@@ -252,17 +308,111 @@ impl Image {
         reader.bytes(range.start, len)
     }
     fn name(&self, reader: &Reader<'_>, rva: u32, budget: &mut usize) -> Result<String> {
+        self.bounded_name(reader, rva, budget, MAX_NAME + 1)
+    }
+    fn bounded_name(
+        &self,
+        reader: &Reader<'_>,
+        rva: u32,
+        budget: &mut usize,
+        bound: usize,
+    ) -> Result<String> {
         let range = self.mapped_range(rva)?;
-        let bytes = reader.bytes(range.start, range.len().min(MAX_NAME + 1))?;
+        let bytes = reader.bytes(range.start, range.len().min(MAX_NAME + 1).min(bound))?;
         let length = bytes
             .iter()
             .position(|&b| b == 0)
-            .ok_or_else(|| Error("unterminated or oversized import name".into()))?;
+            .ok_or_else(|| Error("unterminated or oversized PE name".into()))?;
         if length == 0 || length > MAX_NAME || length > *budget {
-            return Err(Error("import name size limit exceeded".into()));
+            return Err(Error("PE name size limit exceeded".into()));
         }
         *budget -= length;
         Ok(printable(&bytes[..length]))
+    }
+    fn read_exports(
+        &mut self,
+        reader: &Reader<'_>,
+        directory: (u32, u32),
+        budget: &mut usize,
+    ) -> Result<()> {
+        if directory == (0, 0) {
+            return Ok(());
+        }
+        let end = u64::from(directory.0) + u64::from(directory.1);
+        if directory.0 == 0 || directory.1 < 40 || end > u64::from(self.image_size) {
+            return Err(Error("invalid export directory range".into()));
+        }
+        let table = Reader(self.rva_bytes(reader, directory.0, 40)?);
+        let count = table.u32(20)? as usize;
+        let name_count = table.u32(24)? as usize;
+        if count > MAX_EXPORTS || name_count > MAX_EXPORTS {
+            return Err(Error(
+                "export table limit exceeded (65536 addresses/names)".into(),
+            ));
+        }
+        let base = table.u32(16)?;
+        if count > 0 && base.checked_add((count - 1) as u32).is_none() {
+            return Err(Error("export ordinal overflow".into()));
+        }
+        let dll = table.u32(12)?;
+        if dll != 0 {
+            self.export_library = Some(self.name(reader, dll, budget)?);
+        }
+        if count == 0 {
+            if name_count != 0 {
+                return Err(Error("export names without an address table".into()));
+            }
+            return Ok(());
+        }
+        let addresses = table.u32(28)?;
+        if addresses == 0 {
+            return Err(Error("missing export address table RVA".into()));
+        }
+        let addresses = Reader(self.rva_bytes(reader, addresses, count * 4)?);
+        let mut names = vec![Vec::new(); count];
+        if name_count != 0 {
+            let pointers = table.u32(32)?;
+            let ordinals = table.u32(36)?;
+            if pointers == 0 || ordinals == 0 {
+                return Err(Error("missing export name/ordinal table RVA".into()));
+            }
+            let pointers = Reader(self.rva_bytes(reader, pointers, name_count * 4)?);
+            let ordinals = Reader(self.rva_bytes(reader, ordinals, name_count * 2)?);
+            for index in 0..name_count {
+                let slot = ordinals.u16(index * 2)? as usize;
+                if slot >= count || addresses.u32(slot * 4)? == 0 {
+                    return Err(Error(
+                        "export name refers to an invalid address-table slot".into(),
+                    ));
+                }
+                let name = pointers.u32(index * 4)?;
+                if name == 0 {
+                    return Err(Error("missing export name RVA".into()));
+                }
+                names[slot].push(self.name(reader, name, budget)?);
+            }
+        }
+        for (index, names) in names.into_iter().enumerate() {
+            let rva = addresses.u32(index * 4)?;
+            if rva == 0 {
+                continue;
+            } // Sparse address-table hole, not an export.
+            let is_forwarder = u64::from(rva) >= u64::from(directory.0) && u64::from(rva) < end;
+            let forwarder = if is_forwarder {
+                Some(self.bounded_name(reader, rva, budget, (end - u64::from(rva)) as usize)?)
+            } else {
+                None
+            };
+            let file_offset = self.mapped_range(rva).ok().map(|range| range.start);
+            self.exports.push(Export {
+                ordinal: base + index as u32,
+                names,
+                rva,
+                forwarder,
+                file_offset,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -335,6 +485,8 @@ pub fn inspect(bytes: &[u8]) -> Result<Image> {
         certificate_declared: directory(4)?.0 != 0 && directory(4)?.1 != 0,
         sections: Vec::with_capacity(count),
         imports: Vec::new(),
+        export_library: None,
+        exports: Vec::new(),
         warnings: Vec::new(),
     };
     if (image.headers_size as usize) < section_table + count * 40 {
@@ -398,6 +550,8 @@ pub fn inspect(bytes: &[u8]) -> Result<Image> {
     if image.certificate_declared {
         r.bytes(certificate.0 as usize, certificate.1 as usize)?;
     }
+    let mut name_budget = 1024 * 1024;
+    image.read_exports(&r, directory(0)?, &mut name_budget)?;
     let imports = directory(1)?;
     if imports == (0, 0) {
         return Ok(image);
@@ -408,7 +562,6 @@ pub fn inspect(bytes: &[u8]) -> Result<Image> {
     image.rva_bytes(&r, imports.0, imports.1 as usize)?;
     let mut terminated = false;
     let mut symbol_count = 0;
-    let mut name_budget = 1024 * 1024;
     for index in 0..(imports.1 as usize / 20).min(MAX_LIBRARIES + 1) {
         let descriptor = image.rva_bytes(&r, add_rva(imports.0, index * 20)?, 20)?;
         if descriptor.iter().all(|&b| b == 0) {
