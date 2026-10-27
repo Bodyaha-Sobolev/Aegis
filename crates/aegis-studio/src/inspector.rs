@@ -7,15 +7,66 @@ pub struct Inspector {
     image: pe::Image,
     selected: usize,
     filter: String,
+    bytes: Vec<u8>,
+    offset: usize,
 }
 impl Inspector {
-    pub fn new(path: PathBuf, image: pe::Image) -> Self {
+    pub fn new(path: PathBuf, image: pe::Image, bytes: Vec<u8>) -> Self {
         Self {
             path,
             image,
             selected: 0,
             filter: String::new(),
+            bytes,
+            offset: 0,
         }
+    }
+    fn show_bytes(&mut self, ui: &mut egui::Ui) {
+        ui.label("File offsets · snapshot captured during inspection · 256 bytes per page");
+        ui.horizontal(|ui| {
+            ui.label("Offset (decimal)");
+            ui.add(
+                egui::DragValue::new(&mut self.offset)
+                    .range(0..=self.bytes.len().saturating_sub(1)),
+            );
+            if ui.button("Previous").clicked() {
+                self.offset = self.offset.saturating_sub(256);
+            }
+            if ui.button("Next").clicked() {
+                self.offset = self
+                    .offset
+                    .saturating_add(256)
+                    .min(self.bytes.len().saturating_sub(1));
+            }
+        });
+        let end = self.offset.saturating_add(256).min(self.bytes.len());
+        egui::ScrollArea::both().show(ui, |ui| {
+            if let Some(page) = self.bytes.get(self.offset..end) {
+                for (row, bytes) in page.chunks(16).enumerate() {
+                    let hex: String = bytes.iter().map(|b| format!("{b:02X} ")).collect();
+                    let ascii: String = bytes
+                        .iter()
+                        .map(|&b| {
+                            if b.is_ascii_graphic() || b == b' ' {
+                                b as char
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect();
+                    ui.monospace(format!("{:08X}  {hex:48}  {ascii}", self.offset + row * 16));
+                }
+            }
+            ui.separator();
+            ui.label("Unsigned integer at offset (unaligned reads allowed)");
+            for width in [1, 2, 4, 8] {
+                let value = read_integer(&self.bytes, self.offset, width);
+                ui.monospace(match value {
+                    Some((le, be)) => format!("u{}  LE {le}  BE {be}", width * 8),
+                    None => format!("u{}  outside file", width * 8),
+                });
+            }
+        });
     }
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
         let mut open = true;
@@ -24,7 +75,7 @@ impl Inspector {
                 ui.label(RichText::new(self.path.display().to_string()).strong());
                 ui.label("Read-only file analysis · input was not executed · header flags are not a safety verdict");
                 ui.horizontal(|ui| {
-                    for (index, label) in ["Headers", "Sections", "Imports"].iter().enumerate() {
+                    for (index, label) in ["Headers", "Sections", "Imports", "Bytes"].iter().enumerate() {
                         ui.selectable_value(&mut self.selected, index, *label);
                     }
                     if ui.button("Copy report").clicked() { ui.ctx().copy_text(self.image.to_string()); }
@@ -47,12 +98,16 @@ impl Inspector {
                             for label in ["Section", "RVA", "Virtual size", "File offset", "Raw size", "Access"] { ui.strong(label); }
                             ui.end_row();
                             for section in &self.image.sections {
-                                ui.monospace(&section.name);
+                                if ui.selectable_label(false, &section.name).clicked() && section.raw_size != 0 {
+                                    self.offset = section.raw_offset as usize;
+                                    self.selected = 3;
+                                }
                                 for value in [section.rva, section.virtual_size, section.raw_offset, section.raw_size] { ui.monospace(format!("0x{value:X}")); }
                                 ui.monospace(section.permissions()); ui.end_row();
                             }
                         });
                     }).inner,
+                    3 => self.show_bytes(ui),
                     _ => {
                         ui.horizontal(|ui| { ui.label("Filter"); ui.text_edit_singleline(&mut self.filter); });
                         let query = self.filter.to_lowercase();
@@ -74,18 +129,44 @@ impl Inspector {
     }
 }
 
+fn read_integer(bytes: &[u8], offset: usize, width: usize) -> Option<(u64, u64)> {
+    if ![1, 2, 4, 8].contains(&width) {
+        return None;
+    }
+    let data = bytes.get(offset..offset.checked_add(width)?)?;
+    let mut le = 0u64;
+    let mut be = 0u64;
+    for (index, &byte) in data.iter().enumerate() {
+        le |= u64::from(byte) << (index * 8);
+        be = (be << 8) | u64::from(byte);
+    }
+    Some((le, be))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn integer_reads_check_bounds_and_endianness() {
+        assert_eq!(
+            read_integer(&[0x12, 0x34, 0x56], 1, 2),
+            Some((0x5634, 0x3456))
+        );
+        assert_eq!(read_integer(&[255; 8], 0, 8), Some((u64::MAX, u64::MAX)));
+        assert_eq!(read_integer(&[1], 0, 2), None);
+        assert_eq!(read_integer(&[1], usize::MAX, 8), None);
+        assert_eq!(read_integer(&[1], 0, 3), None);
+        assert_eq!(read_integer(&[], 0, 1), None);
+    }
     #[test]
     fn renders_headers_sections_and_filtered_imports() {
         let bytes = aegis_lang::compile("fn main() {}")
             .expect("sample")
             .executable;
         let image = pe::inspect(&bytes).expect("PE");
-        let mut inspector = Inspector::new(PathBuf::from("sample.exe"), image);
+        let mut inspector = Inspector::new(PathBuf::from("sample.exe"), image, bytes);
         let ctx = egui::Context::default();
-        for selected in 0..3 {
+        for selected in 0..4 {
             inspector.selected = selected;
             inspector.filter = "write".into();
             let output = ctx.run(egui::RawInput::default(), |ctx| {

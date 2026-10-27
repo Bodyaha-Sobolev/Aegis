@@ -44,7 +44,7 @@ enum Event {
     Opened(PathBuf, Result<String, String>),
     Output(u64, Vec<u8>),
     Finished(u64, Result<(i32, Duration), String>),
-    Inspected(PathBuf, Result<aegis_lang::pe::Image, String>),
+    Inspected(PathBuf, Result<(aegis_lang::pe::Image, Vec<u8>), String>),
 }
 enum ProtectedAction {
     Open(PathBuf, Zeroizing<Vec<u8>>),
@@ -189,7 +189,11 @@ impl Studio {
         std::thread::spawn(move || {
             let result = storage::read_bounded(&path, aegis_lang::pe::MAX_FILE)
                 .map_err(|e| e.to_string())
-                .and_then(|bytes| aegis_lang::pe::inspect(&bytes).map_err(|e| e.to_string()));
+                .and_then(|bytes| {
+                    aegis_lang::pe::inspect(&bytes)
+                        .map(|image| (image, bytes))
+                        .map_err(|e| e.to_string())
+                });
             let _ = sender.send(Event::Inspected(path, result));
             ctx.request_repaint();
         });
@@ -394,8 +398,8 @@ impl Studio {
                 Event::Inspected(path, result) => {
                     self.inspecting = false;
                     match result {
-                        Ok(image) => {
-                            self.inspector = Some(inspector::Inspector::new(path, image));
+                        Ok((image, bytes)) => {
+                            self.inspector = Some(inspector::Inspector::new(path, image, bytes));
                             self.status = "Binary inspected · file not executed".into();
                         }
                         Err(error) => self.fail(error),
