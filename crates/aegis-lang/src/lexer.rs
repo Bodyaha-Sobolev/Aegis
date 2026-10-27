@@ -26,6 +26,7 @@ pub(crate) enum Keyword {
     U16,
     I8,
     U8,
+    F64,
     Bool,
     True,
     False,
@@ -34,9 +35,12 @@ pub(crate) enum Keyword {
     Print,
     Println,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Kind equality only compares keyword/symbol patterns; float payloads are
+// never compared, so PartialEq (without Eq) is sufficient.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Kind {
     Number(u64),
+    Float(f64),
     String,
     Ident,
     Keyword(Keyword),
@@ -76,6 +80,7 @@ fn keyword(word: &str) -> Option<Keyword> {
         "u16" => Keyword::U16,
         "i8" => Keyword::I8,
         "u8" => Keyword::U8,
+        "f64" => Keyword::F64,
         "bool" => Keyword::Bool,
         "true" => Keyword::True,
         "false" => Keyword::False,
@@ -142,24 +147,59 @@ fn scan(source: &str) -> Vec<Token> {
                 at += 1;
             }
             let end = at;
-            while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
-                at += 1;
-            }
-            if at != end {
-                Kind::Invalid("invalid digit or suffix in integer literal")
+            if !hex
+                && !binary
+                && (bytes.get(end) == Some(&b'.')
+                    || matches!(bytes.get(end), Some(b'e' | b'E')
+                        if matches!(bytes.get(end + 1), Some(b'+' | b'-'))
+                            || bytes.get(end + 1).is_some_and(u8::is_ascii_digit)))
+            {
+                // Decimal float literal: digits ('.' digits?) ([eE] [+-]? digits?).
+                // Overflow parses to infinity; NaN needs a literal spelling.
+                at = digits;
+                while at < bytes.len() && bytes[at].is_ascii_digit() {
+                    at += 1;
+                }
+                if at < bytes.len() && bytes[at] == b'.' {
+                    at += 1;
+                    while at < bytes.len() && bytes[at].is_ascii_digit() {
+                        at += 1;
+                    }
+                }
+                if at < bytes.len() && matches!(bytes[at], b'e' | b'E') {
+                    at += 1;
+                    if at < bytes.len() && matches!(bytes[at], b'+' | b'-') {
+                        at += 1;
+                    }
+                    while at < bytes.len() && bytes[at].is_ascii_digit() {
+                        at += 1;
+                    }
+                }
+                match source[digits..at].parse::<f64>() {
+                    Ok(v) => Kind::Float(v),
+                    Err(_) => Kind::Invalid("invalid float literal"),
+                }
             } else {
-                match u64::from_str_radix(
-                    &source[digits..at],
-                    if hex {
-                        16
-                    } else if binary {
-                        2
-                    } else {
-                        10
-                    },
-                ) {
-                    Ok(n) => Kind::Number(n),
-                    Err(_) => Kind::Invalid("integer literal exceeds 64 bits or has no digits"),
+                let end = at;
+                while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+                    at += 1;
+                }
+                if at != end {
+                    Kind::Invalid("invalid digit or suffix in integer literal")
+                } else {
+                    match u64::from_str_radix(
+                        &source[digits..at],
+                        if hex {
+                            16
+                        } else if binary {
+                            2
+                        } else {
+                            10
+                        },
+                    ) {
+                        Ok(n) => Kind::Number(n),
+                        Err(_) => Kind::Invalid("integer literal exceeds 64 bits or has no digits"),
+                    }
                 }
             }
         } else {
@@ -235,7 +275,7 @@ pub fn highlight(source: &str) -> Vec<Highlight> {
         .filter_map(|token| {
             let kind = match token.kind {
                 Kind::Keyword(_) => HighlightKind::Keyword,
-                Kind::Number(_) => HighlightKind::Number,
+                Kind::Number(_) | Kind::Float(_) => HighlightKind::Number,
                 Kind::String => HighlightKind::String,
                 Kind::Comment => HighlightKind::Comment,
                 Kind::Ident => HighlightKind::Identifier,

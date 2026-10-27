@@ -117,7 +117,12 @@ impl Checker<'_> {
                     if matches!(kind, Keyword::Print | Keyword::Println) {
                         self.expr(value, Some(Type::Str))?;
                     } else {
-                        self.numeric(value, None)?;
+                        let ty = self.numeric(value, None)?;
+                        if !matches!(kind, Keyword::Printi) && !ty.integer() {
+                            return Err(
+                                self.error(&stmt.span, "printc and exit require an integer value")
+                            );
+                        }
                     }
                 }
                 StmtKind::If(condition, yes, no) => {
@@ -257,6 +262,7 @@ impl Checker<'_> {
     fn hint(&self, expr: &Expr) -> Option<Type> {
         match &expr.kind {
             ExprKind::Number(_) => None,
+            ExprKind::Float(_) => Some(Type::F64),
             ExprKind::Bool(_) => Some(Type::Bool),
             ExprKind::String(_) => Some(Type::Str),
             ExprKind::Array(values) => values
@@ -302,6 +308,7 @@ impl Checker<'_> {
         let negated = std::mem::take(&mut self.negate_literal);
         let ty = match &mut expr.kind {
             ExprKind::String(_) => Type::Str,
+            ExprKind::Float(_) => Type::F64,
             ExprKind::Number(n) => {
                 let ty = expected
                     .clone()
@@ -430,10 +437,10 @@ impl Checker<'_> {
                 if *op == "!" {
                     Type::Bool
                 } else {
-                    if ty == Type::Bool {
+                    if (ty == Type::Bool || *op == "~") && !ty.integer() {
                         return Err(self.error(
                             &expr.span,
-                            "arithmetic and bitwise operators require integers",
+                            "bitwise operators require integers; use arithmetic on f64",
                         ));
                     }
                     ty
@@ -448,7 +455,7 @@ impl Checker<'_> {
                     let left_ty =
                         self.numeric(left, hint.or(expected.clone().filter(|t| t.integer())))?;
                     let right_ty = self.numeric(right, None)?;
-                    if left_ty == Type::Bool || right_ty == Type::Bool {
+                    if left_ty == Type::Bool || right_ty == Type::Bool || left_ty.float() {
                         return Err(self.error(&expr.span, "shift operators require integers"));
                     }
                     left_ty
@@ -470,6 +477,18 @@ impl Checker<'_> {
                         return Err(self.error(
                             &expr.span,
                             "arithmetic, ordering and bitwise operators require integers",
+                        ));
+                    }
+                    if left_ty.float() && !comparison && !matches!(*op, "+" | "-" | "*" | "/") {
+                        return Err(self.error(
+                            &expr.span,
+                            "bitwise and remainder operators require integers",
+                        ));
+                    }
+                    if left_ty.float() && !comparison && !matches!(*op, "+" | "-" | "*" | "/") {
+                        return Err(self.error(
+                            &expr.span,
+                            "bitwise and remainder operators require integers",
                         ));
                     }
                     if comparison { Type::Bool } else { left_ty }

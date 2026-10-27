@@ -69,7 +69,7 @@ fn rejects_unused_bad_imports_conflicts_and_alias_chains() {
 fn import_budget_is_bounded() {
     let mut source = String::from("mod a { fn f() {} } fn main() {} ");
     for i in 0..256 {
-        source.push_str(&format!("use a::f as f{i};"));
+        source.push_str(&format!("use a::f as x{i};"));
     }
     compile(&source).expect("256 imports");
     source.push_str("use a::f as extra;");

@@ -1,0 +1,38 @@
+// 64-bit floating point: f64 (IEEE-754 double).
+// Strict typing: integers and floats never mix implicitly; convert with
+// f64(i), i64(f) or u64(f). Arithmetic follows IEEE-754: 1.0/0.0 is inf,
+// 0.0/0.0 is nan, and float division never traps.
+
+fn average(values: [f64; 4]) -> f64 {
+    let sum = 0.0;
+    let i = 0;
+    while (i < len(values)) {
+        sum = sum + values[i];
+        i = i + 1;
+    }
+    return sum / f64(len(values));
+}
+
+fn main() {
+    let big = 3000000000;          // integers stay exact at any magnitude
+    let d = 123.5;                 // float literals carry a dot or exponent
+    let small = 2.5e-1;
+
+    println("mixed arithmetic:");
+    printi(d + small);
+    printi(d * 2.0);
+
+    println("IEEE special values:");
+    printi(1.0 / 3.0);
+    printi(1.0 / 0.0);
+    printi(0.0 / 0.0);
+
+    println("strict conversions:");
+    printi(f64(big));
+    printi(i64(3.99));
+    printi(i64(-3.99));
+
+    println("float aggregates:");
+    let readings: [f64;4] = [10.5, 20.25, 30.125, 39.125];
+    printi(average(readings));
+}

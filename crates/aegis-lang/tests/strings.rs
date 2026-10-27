@@ -69,12 +69,14 @@ fn readonly_string_data_is_a_separate_nonexecutable_pe_section() {
     assert!(b[raw..].windows(5).any(|w| w == b"hello"));
     let pooled =
         compile(r#"fn main() { print("same"); print("\u{73}ame"); }"#).expect("deduplicated pool");
+    // 56 bytes of f64 constant pool and printd spellings precede the strings;
+    // "same" is interned once (8-byte length header plus four bytes).
     assert_eq!(
         u32::from_le_bytes(
             pooled.executable[section + 8..section + 12]
                 .try_into()
                 .expect("virtual size")
         ),
-        20
+        76
     );
 }

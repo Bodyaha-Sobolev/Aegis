@@ -18,6 +18,7 @@ pub(crate) enum Type {
     U16,
     I8,
     U8,
+    F64,
     Bool,
     Str,
     Array(Arc<Type>, usize),
@@ -107,6 +108,9 @@ impl Type {
             _ => 64,
         }
     }
+    pub fn float(&self) -> bool {
+        matches!(self, Self::F64)
+    }
 }
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -125,6 +129,7 @@ impl std::fmt::Display for Type {
             Self::U16 => "u16",
             Self::I8 => "i8",
             Self::U8 => "u8",
+            Self::F64 => "f64",
             Self::Bool => "bool",
             Self::Str => "str",
             Self::Array(..) | Self::Record(_) => unreachable!(),
@@ -206,6 +211,7 @@ pub(crate) struct Expr {
 #[derive(Debug)]
 pub(crate) enum ExprKind {
     Number(u64),
+    Float(f64),
     Bool(bool),
     String(String),
     Array(Vec<Expr>),
@@ -472,12 +478,13 @@ impl Parser<'_> {
             Kind::Keyword(Keyword::U16) => Type::U16,
             Kind::Keyword(Keyword::I8) => Type::I8,
             Kind::Keyword(Keyword::U8) => Type::U8,
+            Kind::Keyword(Keyword::F64) => Type::F64,
             Kind::Keyword(Keyword::Bool) => Type::Bool,
             Kind::Keyword(Keyword::Str) => Type::Str,
             _ => {
-                return Err(
-                    self.error("expected type i64, u64, i32, u32, i16, u16, i8, u8, bool or str")
-                );
+                return Err(self.error(
+                    "expected type i64, u64, i32, u32, i16, u16, i8, u8, f64, bool or str",
+                ));
             }
         };
         self.at += 1;
@@ -985,6 +992,10 @@ impl Parser<'_> {
                 self.at += 1;
                 ExprKind::Number(n)
             }
+            Kind::Float(v) => {
+                self.at += 1;
+                ExprKind::Float(v)
+            }
             Kind::Keyword(Keyword::True | Keyword::False) => {
                 self.at += 1;
                 ExprKind::Bool(token.kind == Kind::Keyword(Keyword::True))
@@ -998,6 +1009,7 @@ impl Parser<'_> {
                 | Keyword::U16
                 | Keyword::I8
                 | Keyword::U8
+                | Keyword::F64
                 | Keyword::Bool,
             ) => {
                 let ty = self.type_name()?;

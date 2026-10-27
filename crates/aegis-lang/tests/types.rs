@@ -160,3 +160,53 @@ fn narrow_folding_matches_the_canonical_runtime_form() {
         assert_eq!(a.executable, b.executable);
     }
 }
+#[test]
+fn float_signatures_reach_the_ide_outline() {
+    let functions = analyze("fn scale(v: f64, k: i64) -> f64 { return v * f64(k); } fn main() {}")
+        .expect("float signature");
+    assert_eq!(functions[0].signature, "scale(v: f64, k: i64) -> f64");
+}
+
+#[test]
+fn floats_are_strict_against_integers() {
+    for source in [
+        "fn main() { let x: f64 = 2; }",
+        "fn main() { printi(1 + 1.5); }",
+        "fn main() { printi(1.5 & 2.0); }",
+        "fn main() { printi(1.5 % 2.0); }",
+        "fn main() { printi(1.5 << 1); }",
+        "fn main() { printc(1.5); }",
+        "fn main() { let x: i64 = 1.5; }",
+    ] {
+        let error = compile(source).expect_err(source);
+        assert!(
+            error.message.contains("mismatch") || error.message.contains("require"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn float_folding_matches_the_runtime_bit_for_bit() {
+    let pairs = [
+        ("1.5 + 2.25", "f64(3.75)"),
+        ("-1.5", "f64(-1.5)"),
+        ("2.0 / 8.0", "f64(0.25)"),
+        ("-0.0", "f64(-0.0)"),
+        ("1.0 / 0.0", "f64(1e300) * f64(1e300)"),
+    ];
+    for (folded, runtime) in pairs {
+        let a = compile(&format!(
+            "fn main() {{ let x: f64 = {folded}; return i64(x); }}"
+        ))
+        .expect(folded);
+        let b = compile(&format!(
+            "fn main() {{ let x: f64 = {runtime}; return i64(x); }}"
+        ))
+        .expect(runtime);
+        assert_eq!(a.executable, b.executable, "{folded}");
+    }
+    let a = compile("fn main() { let b: bool = bool(0.5); return i64(b); }").expect("bool fold");
+    let b = compile("fn main() { let b: bool = true; return i64(b); }").expect("bool runtime");
+    assert_eq!(a.executable, b.executable);
+}

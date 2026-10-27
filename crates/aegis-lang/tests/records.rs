@@ -45,15 +45,15 @@ fn invalid_records_fail_equally_in_ide_and_compiler() {
 #[test]
 fn layouts_and_live_storage_are_bounded() {
     let fields = (0..256)
-        .map(|i| format!("f{i}:i64"))
+        .map(|i| format!("n{i}:i64"))
         .collect::<Vec<_>>()
         .join(",");
     let values = (0..256)
-        .map(|i| format!("f{i}:{i}"))
+        .map(|i| format!("n{i}:{i}"))
         .collect::<Vec<_>>()
         .join(",");
     compile(&format!(
-        "struct P {{ {fields} }} fn main() {{ let p=P {{ {values} }}; printi(p.f255); }}"
+        "struct P {{ {fields} }} fn main() {{ let p=P {{ {values} }}; printi(p.n255); }}"
     ))
     .expect("full frame");
     let error = compile(&format!(

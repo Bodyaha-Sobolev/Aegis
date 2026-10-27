@@ -57,10 +57,10 @@ def main():
         ('struct_recursive', 'struct P { x:i64,y:i64 } fn sum(p:P,n) { if(n==0) { return p.x+p.y; } p.x=p.x+1; return sum(p,n-1); } fn main() { let p=P { x:1,y:2 }; printi(sum(p,8)); printi(p.x); }', b'11\n1\n', 0),
         ('struct_single', 'struct P { x:i64 } fn f(p:P,a,b,c,d) { printi(p.x+a+b+c+d); p.x=99; } fn main() { let p=P { x:1 }; f(p,2,3,4,5); printi(p.x); }', b'15\n1\n', 0),
     ])
-    record_fields = ','.join(f'f{i}:i64' for i in range(256))
-    record_values = ','.join(f'f{i}:{i}' for i in reversed(range(256)))
-    cases.append(('struct_full_layout', 'struct P {'+record_fields+'} fn main() { let p=P {'+record_values+'}; printi(p.f0); printi(p.f255); p.f255=42; printi(p.f255); }', b'0\n255\n42\n', 0))
-    cases.append(('struct_full_argument', 'struct P {'+record_fields+'} fn f(p:P) { printi(p.f0); printi(p.f255); p.f255=42; printi(p.f255); } fn main() { f(P {'+record_values+'}); }', b'0\n255\n42\n', 0))
+    record_fields = ','.join(f'n{i}:i64' for i in range(256))
+    record_values = ','.join(f'n{i}:{i}' for i in reversed(range(256)))
+    cases.append(('struct_full_layout', 'struct P {'+record_fields+'} fn main() { let p=P {'+record_values+'}; printi(p.n0); printi(p.n255); p.n255=42; printi(p.n255); }', b'0\n255\n42\n', 0))
+    cases.append(('struct_full_argument', 'struct P {'+record_fields+'} fn f(p:P) { printi(p.n0); printi(p.n255); p.n255=42; printi(p.n255); } fn main() { f(P {'+record_values+'}); }', b'0\n255\n42\n', 0))
     cases.extend([
         ('nested_struct_copy', 'struct E { p:P, n:i64 } struct P { x:i64,y:i64 } fn main() { let a=E { n:7,p:P { x:2,y:3 } }; let b=a; b.p.x=9; printi(a.p.x); printi(b.p.x); a.p=b.p; printi(a.p.x); a.p=P { y:a.p.x,x:a.p.y }; printi(a.p.x); printi(a.p.y); printi(a.n); }', b'2\n9\n9\n3\n9\n7\n', 0),
         ('nested_struct_argument', 'struct E { p:P, a:[i64;3] } struct P { x:i64,y:i64 } fn f(e:E) { printi(e.p.x+e.p.y+e.a[2]); e.p.x=99; e.a[0]=88; } fn main() { let e=E { a:[4;3],p:P { y:2,x:1 } }; f(e); printi(e.p.x); printi(e.a[0]); f(E { p:e.p,a:e.a }); }', b'7\n1\n4\n7\n', 0),
@@ -421,6 +421,120 @@ def main():
                      (lambda a, s=signed: s(-a), lambda a, s=signed: s(~a)))
         unary_oracle(f'uint{width}_unary', uname, ulit, uvalues,
                      (lambda a, u=unsigned: u(-a), lambda a, u=unsigned: u(~a)))
+    # f64: IEEE-754 doubles checked against Python's native float model.
+    f64_values = [0.0, 1.0, -1.0, 0.5, -0.5, 2.5, -2.5, 0.25, 3.75, -0.125,
+                  123.5, 100000.0, -100000.0, 0.0009765625, 1e10, -0.001]
+
+    def fdiv(a, b):
+        try:
+            return a / b
+        except ZeroDivisionError:
+            if a == 0 or a != a:
+                return float('nan')
+            return float('inf') if a > 0 else float('-inf')
+
+    def cvt_i64(v):
+        if v != v or v >= 2 ** 63 or v < -(2 ** 63):
+            return -(2 ** 63)
+        return int(v)
+
+    def cvt_u64(v):
+        return int(v) & 0xFFFFFFFFFFFFFFFF
+
+    def ffmt(v):
+        # Mirror of the printd algorithm: f64 scaling with round-half-up on
+        # the fraction, nan/inf spellings, values at or above 2^63 as inf.
+        # The last digit may differ from ideal decimal rounding of the exact
+        # binary value; that is a documented property of the helper.
+        import math
+        if v != v:
+            return 'nan'
+        if v == float('inf'):
+            return 'inf'
+        if v == float('-inf'):
+            return '-inf'
+        sign = '-' if v < 0 or (v == 0 and math.copysign(1.0, v) < 0) else ''
+        a = abs(v)
+        if a >= 2 ** 63:
+            return sign + 'inf'
+        whole = int(a)
+        d = int((a - whole) * 1e6 + 0.5)
+        if d >= 1000000:
+            d -= 1000000
+            whole += 1
+        return f'{sign}{whole}.{d:06d}'
+
+    def float_binary_oracle(name, ops, result_ty):
+        for index, (op, model) in enumerate(ops.items()):
+            body, expected = [], []
+            for i, a in enumerate(f64_values):
+                for b in [f64_values[(i + 3) % len(f64_values)],
+                          f64_values[(i + 1) % len(f64_values)],
+                          f64_values[len(f64_values) - 1 - i]]:
+                    la, lb = repr(a), repr(b)
+                    body.extend([f'printi(calc({la},{lb}));',
+                                 f'printi(f64({la}) {op} f64({lb}));'])
+                    value = model(a, b)
+                    text = ffmt(value) if result_ty == 'f64' else str(int(value))
+                    expected.extend([text] * 2)
+            source = (f'fn calc(a: f64, b: f64) -> {result_ty} {{ return a {op} b; }} '
+                      'fn main() {' + ''.join(body) + 'return 0; }')
+            cases.append((f'{name}_{index}', source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    float_binary_oracle('f64_arith', {
+        '+': lambda a, b: a + b, '-': lambda a, b: a - b,
+        '*': lambda a, b: a * b, '/': fdiv,
+    }, 'f64')
+    float_binary_oracle('f64_cmp', {
+        '==': lambda a, b: a == b, '!=': lambda a, b: a != b,
+        '<': lambda a, b: a < b, '>': lambda a, b: a > b,
+        '<=': lambda a, b: a <= b, '>=': lambda a, b: a >= b,
+    }, 'bool')
+
+    def float_unary_oracle():
+        body, expected = [], []
+        for v in f64_values:
+            lv = repr(v)
+            body.extend([f'printi(neg({lv}));', f'printi(anti({lv}));'])
+            expected.extend([ffmt(-v), '1' if not (v == v and v != 0.0) else '0'])
+        source = ('fn neg(a: f64) -> f64 { return -a; } '
+                  'fn anti(a: f64) -> bool { return !a; } '
+                  'fn main() {' + ''.join(body) + 'return 0; }')
+        cases.append(('f64_unary', source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    float_unary_oracle()
+
+    def float_conversion_oracle():
+        body, expected = [], []
+        for v in [3.99, -3.99, 0.5, -0.5, 2147483648.0, -2147483648.0, 1e10, -1e10, 0.0]:
+            lv = repr(v)
+            i, u = cvt_i64(v), cvt_u64(v)
+            body.extend([f'printi(i64({lv}));', f'printi(u64({lv}));', f'printi(f64(i64({lv})));'])
+            expected.extend([str(i), str(u), ffmt(float(i))])
+        source = 'fn main() {' + ''.join(body) + 'return 0; }'
+        cases.append(('f64_conversions', source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    float_conversion_oracle()
+
+    cases.extend([
+        ('f64_u64_runtime_split', 'fn t(v: f64) -> u64 { return u64(v); } fn main() { printi(t(1e19)); printi(t(1e300)); printi(t(3.99)); printi(t(-1.5)); }', b'10000000000000000000\n0\n3\n18446744073709551615\n', 0),
+        ('f64_u64_edges', 'fn main() { printi(u64(1e19)); printi(u64(0.0/0.0)); printi(u64(1e300)); printi(u64(-1.5)); }', b'10000000000000000000\n9223372036854775808\n0\n18446744073709551615\n', 0),
+        ('f64_i64_indefinite', 'fn main() { printi(i64(1e300)); printi(i64(0.0/0.0)); }', b'-9223372036854775808\n-9223372036854775808\n', 0),
+        ('f64_abi_mixed', 'fn mix(a: f64, b: i64, c: f64, d: str, e: f64, f: i64) -> f64 { return a + f64(b) + c + f64(len(d)) + e + f64(f); } fn main() { printi(mix(1.5, 10, 0.25, "abcd", -2.0, 100)); }', b'113.750000\n', 0),
+        ('f64_aggregates', 'struct P { x: f64, y: f64 } fn sum(p: P) -> f64 { return p.x + p.y; } fn main() { let a = P { x: 1.5, y: 2.25 }; let b = a; b.x = 9.5; printi(sum(a)); printi(sum(b)); let arr: [f64;3] = [0.5, 1.5, 2.5]; printi(arr[0] + arr[1] + arr[2]); }', b'3.750000\n11.750000\n4.500000\n', 0),
+        ('f64_recursion', 'fn half(n: f64) -> f64 { if (n < 1.0) { return n; } return half(n / 2.0); } fn main() { printi(half(100.0)); }', b'0.781250\n', 0),
+        ('f64_zero_sign', 'fn main() { printi(-0.0); printi(0.0); printi(-0.0 == 0.0); printi(1.0 / -0.0); }', b'-0.000000\n0.000000\n1\n-inf\n', 0),
+        ('f64_short_circuit', 'fn main() { printi(0.0/0.0 && 1.0); printi(1.5 && 2.5); printi(0.0 || 1.5); }', b'0\n1\n1\n', 0),
+    ])
+    errors.extend([
+        ('float_strict_int_literal', 'fn main() { let x: f64 = 2; }', b'type mismatch'),
+        ('float_strict_mixed_arith', 'fn main() { printi(1 + 1.5); }', b'type mismatch'),
+        ('float_bitwise', 'fn main() { printi(1.5 & 2.0); }', b'require integers'),
+        ('float_remainder', 'fn main() { printi(1.5 % 2.0); }', b'require integers'),
+        ('float_shift', 'fn main() { printi(1.5 << 1); }', b'shift operators require integers'),
+        ('float_printc', 'fn main() { printc(1.5); }', b'require an integer'),
+        ('float_exit', 'fn main() { exit(1.5); }', b'require an integer'),
+    ])
     cases.extend([
         ('int32_hex_patterns', 'fn main() { let h: i32 = 0x80000000; let f: i32 = 0xffffffff; let t: i32 = 0x7fffffff; printi(h); printi(f); printi(t); printi(f + 1); printi(h >> 31); }', b'-2147483648\n-1\n2147483647\n0\n-1\n', 0),
         ('int8_hex_patterns', 'fn main() { let h: i8 = 0x80; let f: i8 = 0xff; let t: i8 = 0x7f; printi(h); printi(f); printi(t); printi(f + 1); printi(h >> 7); }', b'-128\n-1\n127\n0\n-1\n', 0),
