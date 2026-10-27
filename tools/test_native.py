@@ -602,6 +602,21 @@ def main():
         ('f32_bitwise', 'fn main() { printi(1.5 & 2.0); }', b'require integers'),
     ])
 
+    cases.extend([
+        ('heap_concat_basics', 'fn main() { let who = "world"; let m = "hello, " + who + "!"; println(m); printi(len(m)); printi(m[7]); println("hello, " + "world"); }', b'hello, world!\n13\n119\nhello, world\n', 0),
+        ('heap_concat_equality', 'fn main() { let m = "hello" + ", " + "world"; printi(m == "hello, world"); printi(m != "hello, world"); printi(m == "hello, world!"); let n = "hell" + "o"; printi(n == "hello"); }', b'1\n0\n0\n1\n', 0),
+        ('heap_concat_stress', 'fn main() { let i = 0; let acc = ""; while(i < 20000) { acc = acc + "x"; i = i + 1; } printi(len(acc)); printi(acc[19999]); }', b'20000\n120\n', 0),
+        ('heap_concat_functions', 'fn wrap(s: str) -> str { return "[" + s + "]"; } fn shout(s: str) -> str { return s + "!"; } fn main() { println(wrap(shout("ok"))); println(shout(wrap("a") + wrap("b"))); let nested = wrap(wrap("deep")); println(nested); }', b'[ok!]\n[a][b]!\n[[deep]]\n', 0),
+        ('heap_concat_recursion', 'fn build(n: i64) -> str { if(n == 0) { return ""; } return build(n - 1) + "ab"; } fn main() { let s = build(10); printi(len(s)); println(s); }', b'20\nabababababababababab\n', 0),
+        ('heap_concat_struct_fields', 'struct Named { label: str, id: i64 } fn label(n: Named) -> str { return n.label + ":"; } fn main() { let n = Named { label: "item", id: 7 }; println(label(n)); let deep = label(n) + label(n); println(deep); printi(n.id); }', b'item:\nitem:item:\n7\n', 0),
+        ('heap_concat_arrays', 'fn main() { let words: [str;3] = ["x", "y", "z"]; let joined = words[0] + words[1] + words[2]; println(joined); let a: [str;2] = [joined;2]; println(a[1] + "!"); printi(len(a[0])); }', b'xyz\nxyz!\n3\n', 0),
+        ('heap_concat_branches', 'fn pick(flag: bool) -> str { if(flag) { return "yes" + "!"; } return "no"; } fn main() { println(pick(true)); println(pick(false)); let i = 0; while(i < 3) { println(pick(i % 2 == 1)); i = i + 1; } }', b'yes!\nno\nno\nyes!\nno\n', 0),
+    ])
+    errors.extend([
+        ('heap_str_strict_arith', 'fn main() { printi("a" + 1); }', b'type mismatch'),
+        ('heap_str_strict_cmp_ord', 'fn main() { printi("a" < "b"); }', b'strings support only'),
+    ])
+
     errors.extend([
         ('float_strict_int_literal', 'fn main() { let x: f64 = 2; }', b'type mismatch'),
         ('float_strict_mixed_arith', 'fn main() { printi(1 + 1.5); }', b'type mismatch'),

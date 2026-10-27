@@ -477,7 +477,7 @@ impl Checker<'_> {
                         .unwrap_or(default);
                     let left_ty = self.scalar(left, Some(common.clone()))?;
                     self.scalar(right, Some(left_ty.clone()))?;
-                    if left_ty == Type::Str && !matches!(*op, "==" | "!=") {
+                    if left_ty == Type::Str && !matches!(*op, "==" | "!=" | "+") {
                         return Err(
                             self.error(&expr.span, "strings support only == and != operators")
                         );

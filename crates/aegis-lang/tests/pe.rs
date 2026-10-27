@@ -23,7 +23,10 @@ fn inspects_native_compiler_output_without_mutating_it() {
         [
             Symbol::Name("GetStdHandle".into()),
             Symbol::Name("WriteFile".into()),
-            Symbol::Name("ExitProcess".into())
+            Symbol::Name("ExitProcess".into()),
+            Symbol::Name("GetProcessHeap".into()),
+            Symbol::Name("HeapAlloc".into()),
+            Symbol::Name("HeapFree".into())
         ]
     );
 }

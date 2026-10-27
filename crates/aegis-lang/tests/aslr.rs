@@ -36,7 +36,9 @@ fn generated_images_have_consistent_relocation_and_permission_metadata() {
         assert_eq!(bytes.len(), raw + 512);
         assert_eq!(read32(raw), 0x1000);
         assert_eq!(read32(raw + 4), 12);
-        assert!(bytes[raw + 8..].iter().all(|b| *b == 0)); // ABSOLUTE padding, no fixups.
+        // ABSOLUTE padding: the unbound IAT holds RVAs the loader resolves,
+        // so no DIR64 fixups exist and none may be fabricated for it.
+        assert!(bytes[raw + 8..].iter().all(|b| *b == 0));
     }
 }
 

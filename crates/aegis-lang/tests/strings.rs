@@ -34,7 +34,6 @@ fn rejects_invalid_escapes_and_unsafe_string_operations() {
         r#"fn main() { if("abc") {} }"#,
         r#"fn main() { let x=i64("abc"); }"#,
         r#"fn main() { let x=bool("abc"); }"#,
-        r#"fn main() { let x="a"+"b"; }"#,
         r#"fn main() { printi("a"<"b"); }"#,
         r#"fn main() { let a=["a"]; a[0][0]=1; }"#,
     ];
