@@ -19,6 +19,7 @@ pub(crate) enum Type {
     I8,
     U8,
     F64,
+    F32,
     Bool,
     Str,
     Array(Arc<Type>, usize),
@@ -109,7 +110,10 @@ impl Type {
         }
     }
     pub fn float(&self) -> bool {
-        matches!(self, Self::F64)
+        matches!(self, Self::F64 | Self::F32)
+    }
+    pub fn single(&self) -> bool {
+        matches!(self, Self::F32)
     }
 }
 impl std::fmt::Display for Type {
@@ -130,6 +134,7 @@ impl std::fmt::Display for Type {
             Self::I8 => "i8",
             Self::U8 => "u8",
             Self::F64 => "f64",
+            Self::F32 => "f32",
             Self::Bool => "bool",
             Self::Str => "str",
             Self::Array(..) | Self::Record(_) => unreachable!(),
@@ -479,11 +484,12 @@ impl Parser<'_> {
             Kind::Keyword(Keyword::I8) => Type::I8,
             Kind::Keyword(Keyword::U8) => Type::U8,
             Kind::Keyword(Keyword::F64) => Type::F64,
+            Kind::Keyword(Keyword::F32) => Type::F32,
             Kind::Keyword(Keyword::Bool) => Type::Bool,
             Kind::Keyword(Keyword::Str) => Type::Str,
             _ => {
                 return Err(self.error(
-                    "expected type i64, u64, i32, u32, i16, u16, i8, u8, f64, bool or str",
+                    "expected type i64, u64, i32, u32, i16, u16, i8, u8, f64, f32, bool or str",
                 ));
             }
         };
@@ -1010,6 +1016,7 @@ impl Parser<'_> {
                 | Keyword::I8
                 | Keyword::U8
                 | Keyword::F64
+                | Keyword::F32
                 | Keyword::Bool,
             ) => {
                 let ty = self.type_name()?;

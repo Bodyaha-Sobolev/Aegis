@@ -210,3 +210,33 @@ fn float_folding_matches_the_runtime_bit_for_bit() {
     let b = compile("fn main() { let b: bool = true; return i64(b); }").expect("bool runtime");
     assert_eq!(a.executable, b.executable);
 }
+#[test]
+fn single_precision_signatures_reach_the_ide_outline() {
+    let functions =
+        analyze("fn half(v: f32) -> f32 { return v * 0.5; } fn main() {}").expect("f32 signature");
+    assert_eq!(functions[0].signature, "half(v: f32) -> f32");
+    let error = compile("fn main() { let a: f32 = 1.0; let b: f64 = 1.0; printi(a + b); }")
+        .expect_err("f32/f64 mix");
+    assert!(error.message.contains("mismatch"), "{error}");
+}
+
+#[test]
+fn single_precision_folding_matches_the_runtime() {
+    let pairs = [
+        ("1.5 + 2.25", "f32(3.75)"),
+        ("-1.5", "f32(-1.5)"),
+        ("2.0 / 8.0", "f32(0.25)"),
+        ("-0.0", "f32(-0.0)"),
+    ];
+    for (folded, runtime) in pairs {
+        let a = compile(&format!(
+            "fn main() {{ let x: f32 = {folded}; return i64(x); }}"
+        ))
+        .expect(folded);
+        let b = compile(&format!(
+            "fn main() {{ let x: f32 = {runtime}; return i64(x); }}"
+        ))
+        .expect(runtime);
+        assert_eq!(a.executable, b.executable, "{folded}");
+    }
+}

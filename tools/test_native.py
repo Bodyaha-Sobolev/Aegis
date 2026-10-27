@@ -526,6 +526,82 @@ def main():
         ('f64_zero_sign', 'fn main() { printi(-0.0); printi(0.0); printi(-0.0 == 0.0); printi(1.0 / -0.0); }', b'-0.000000\n0.000000\n1\n-inf\n', 0),
         ('f64_short_circuit', 'fn main() { printi(0.0/0.0 && 1.0); printi(1.5 && 2.5); printi(0.0 || 1.5); }', b'0\n1\n1\n', 0),
     ])
+    # f32: single precision checked against a Python f32 model built with
+    # struct (round the inputs, compute in double, round the result).
+    import struct as _struct
+
+    def f32(v):
+        return _struct.unpack('<f', _struct.pack('<f', v))[0]
+
+    f32_values = [0.0, 1.0, -1.0, 0.5, -0.5, 2.5, -2.5, 0.25, 3.75, -0.125,
+                  100.0, -100.0]
+
+    def f32div(a, b):
+        try:
+            return f32(a / b)
+        except ZeroDivisionError:
+            if a == 0 or a != a:
+                return float('nan')
+            return float('inf') if a > 0 else float('-inf')
+
+    def cvt_i64_32(v):
+        if v != v or v >= 2 ** 63 or v < -(2 ** 63):
+            return -(2 ** 63)
+        return int(v)
+
+    def float32_binary_oracle(name, ops, result_ty):
+        for index, (op, model) in enumerate(ops.items()):
+            body, expected = [], []
+            for i, a in enumerate(f32_values):
+                for b in [f32_values[(i + 3) % len(f32_values)],
+                          f32_values[(i + 1) % len(f32_values)],
+                          f32_values[len(f32_values) - 1 - i]]:
+                    la, lb = repr(a), repr(b)
+                    body.extend([f'printi(calc({la},{lb}));',
+                                 f'printi(f32({la}) {op} f32({lb}));'])
+                    value = model(f32(a), f32(b))
+                    text = ffmt(value) if result_ty == 'f32' else str(int(value))
+                    expected.extend([text] * 2)
+            source = (f'fn calc(a: f32, b: f32) -> {result_ty} {{ return a {op} b; }} '
+                      'fn main() {' + ''.join(body) + 'return 0; }')
+            cases.append((f'{name}_{index}', source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    float32_binary_oracle('f32_arith', {
+        '+': lambda a, b: f32(a + b), '-': lambda a, b: f32(a - b),
+        '*': lambda a, b: f32(a * b), '/': f32div,
+    }, 'f32')
+    float32_binary_oracle('f32_cmp', {
+        '==': lambda a, b: a == b, '!=': lambda a, b: a != b,
+        '<': lambda a, b: a < b, '>': lambda a, b: a > b,
+    }, 'bool')
+
+    def float32_conversion_oracle():
+        body, expected = [], []
+        for v in [3.99, -3.99, 0.5, -0.5, 100.0, -100.0, 0.0]:
+            lv = repr(v)
+            f = f32(v)
+            i, u = cvt_i64_32(f), int(f) & 0xFFFFFFFF
+            body.extend([f'printi(i32({lv}));', f'printi(u32({lv}));',
+                         f'printi(f64(f32({lv})));', f'printi(f32(f64({lv})));'])
+            expected.extend([str(i), str(u), ffmt(float(f)), ffmt(f)])
+        source = 'fn main() {' + ''.join(body) + 'return 0; }'
+        cases.append(('f32_conversions', source, ('\n'.join(expected) + '\n').encode(), 0))
+
+    float32_conversion_oracle()
+
+    cases.extend([
+        ('f32_abi_mixed', 'fn mix(a: f32, b: i64, c: f64, d: f32) -> f64 { return f64(a) + f64(b) + c + f64(d); } fn main() { printi(mix(1.5, 10, 0.25, -2.0)); }', b'9.750000\n', 0),
+        ('f32_aggregates', 'struct P { x: f32, y: f32 } fn sum(p: P) -> f32 { return p.x + p.y; } fn main() { let a = P { x: 1.5, y: 2.25 }; let b = a; b.x = 9.5; printi(sum(a)); printi(sum(b)); let arr: [f32;2] = [0.5, 1.5]; printi(arr[0] + arr[1]); }', b'3.750000\n11.750000\n2.000000\n', 0),
+        ('f32_u32_edges', 'fn main() { printi(u32(1e10)); printi(u32(0.0/0.0)); printi(u32(-1.5)); printi(i32(1e300)); }', b'1410065408\n0\n4294967295\n0\n', 0),
+        ('f32_precision', 'fn main() { let a: f32 = 0.1; printi(a); printi(f64(a)); let x: f32 = 16777216.0; printi(x + 1.0); }', b'0.100000\n0.100000\n16777216.000000\n', 0),
+    ])
+    errors.extend([
+        ('f32_strict_int', 'fn main() { let x: f32 = 2; }', b'type mismatch'),
+        ('f32_strict_f64_mix', 'fn main() { let a: f32 = 1.5; let b = 2.5; printi(a + b); }', b'type mismatch'),
+        ('f32_strict_f64', 'fn main() { let a: f32 = 1.0; let b: f64 = 1.0; printi(a + b); }', b'type mismatch'),
+        ('f32_bitwise', 'fn main() { printi(1.5 & 2.0); }', b'require integers'),
+    ])
+
     errors.extend([
         ('float_strict_int_literal', 'fn main() { let x: f64 = 2; }', b'type mismatch'),
         ('float_strict_mixed_arith', 'fn main() { printi(1 + 1.5); }', b'type mismatch'),

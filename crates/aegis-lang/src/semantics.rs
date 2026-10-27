@@ -262,7 +262,7 @@ impl Checker<'_> {
     fn hint(&self, expr: &Expr) -> Option<Type> {
         match &expr.kind {
             ExprKind::Number(_) => None,
-            ExprKind::Float(_) => Some(Type::F64),
+            ExprKind::Float(_) => None,
             ExprKind::Bool(_) => Some(Type::Bool),
             ExprKind::String(_) => Some(Type::Str),
             ExprKind::Array(values) => values
@@ -308,7 +308,7 @@ impl Checker<'_> {
         let negated = std::mem::take(&mut self.negate_literal);
         let ty = match &mut expr.kind {
             ExprKind::String(_) => Type::Str,
-            ExprKind::Float(_) => Type::F64,
+            ExprKind::Float(_) => expected.clone().filter(|t| t.float()).unwrap_or(Type::F64),
             ExprKind::Number(n) => {
                 let ty = expected
                     .clone()
@@ -461,11 +461,20 @@ impl Checker<'_> {
                     left_ty
                 } else {
                     let comparison = matches!(*op, "==" | "!=" | "<" | ">" | "<=" | ">=");
+                    // Float literals default to f64; int literals to i64.
+                    // Mixing them still fails the per-operand type checks.
+                    let default = if matches!(left.kind, ExprKind::Float(_))
+                        || matches!(right.kind, ExprKind::Float(_))
+                    {
+                        Type::F64
+                    } else {
+                        Type::I64
+                    };
                     let common = self
                         .hint(left)
                         .or_else(|| self.hint(right))
                         .or(if comparison { None } else { expected.clone() })
-                        .unwrap_or(Type::I64);
+                        .unwrap_or(default);
                     let left_ty = self.scalar(left, Some(common.clone()))?;
                     self.scalar(right, Some(left_ty.clone()))?;
                     if left_ty == Type::Str && !matches!(*op, "==" | "!=") {

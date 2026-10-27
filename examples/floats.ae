@@ -35,4 +35,11 @@ fn main() {
     println("float aggregates:");
     let readings: [f64;4] = [10.5, 20.25, 30.125, 39.125];
     printi(average(readings));
+
+    println("single precision f32:");
+    let h: f32 = 0.1;
+    printi(h);
+    printi(f64(h));
+    let w: f32 = 16777216.0;
+    printi(w + 1.0);
 }
