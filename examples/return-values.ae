@@ -1,0 +1,22 @@
+struct Position { x: i64, y: i64 }
+struct Actor { position: Position, health: i64 }
+struct World { actors: [Actor; 4] }
+fn initial() -> World {
+    return World { actors: [Actor { position: Position { x: 1, y: 2 }, health: 100 }; 4] };
+}
+fn tick(world: World, dx: i64) -> World {
+    let i = 0;
+    while (i < len(world.actors)) {
+        world.actors[i].position.x = world.actors[i].position.x + dx;
+        i = i + 1;
+    }
+    return world;
+}
+fn main() {
+    let before = initial();
+    let after = tick(before, 3);
+    printi(before.actors[0].position.x);
+    printi(after.actors[0].position.x);
+    after = tick(tick(after, 2), 4);
+    printi(after.actors[3].position.x);
+}

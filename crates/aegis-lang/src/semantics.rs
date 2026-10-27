@@ -39,8 +39,23 @@ pub(crate) fn check(source: &str, program: &mut Program) -> Result<(), Diagnosti
             checker.vars.push((param.name.clone(), param.ty.clone()));
         }
         checker.block(&mut function.body)?;
+        if function.result.aggregate() && !returns(&function.body) {
+            return Err(checker.error(
+                &function.span,
+                "aggregate result requires return on every path",
+            ));
+        }
     }
     Ok(())
+}
+// Conservative definite-return analysis: loops are not assumed to terminate or return.
+fn returns(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match &stmt.kind {
+        StmtKind::Return(_) => true,
+        StmtKind::Block(body) => returns(body),
+        StmtKind::If(_, yes, no) => returns(yes) && returns(no),
+        _ => false,
+    })
 }
 struct Checker<'a> {
     source: &'a str,
@@ -90,7 +105,7 @@ impl Checker<'_> {
                     self.aggregate_value(value, Some(ty))?;
                 }
                 StmtKind::Return(value) => {
-                    self.expr(value, Some(self.result.clone()))?;
+                    self.aggregate_value(value, Some(self.result.clone()))?;
                 }
                 StmtKind::Expr(value) => {
                     self.expr(value, None)?;

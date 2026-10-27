@@ -442,10 +442,6 @@ impl Parser<'_> {
                 Type::I64
             };
             let body = self.block()?;
-            if result.aggregate() {
-                return Err(self
-                    .error("array return values and struct return values are not supported yet"));
-            }
             functions.push(Function {
                 name,
                 params,

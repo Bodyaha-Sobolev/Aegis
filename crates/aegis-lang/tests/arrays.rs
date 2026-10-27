@@ -34,7 +34,6 @@ fn rejects_invalid_types_and_storage_escape() {
         "fn main() { let a=[1]; printi(a==a); }",
         "fn main() { let a=[1]; return a; }",
         "fn f(a:[i64;2]) {} fn main() { f([1]); }",
-        "fn f()->[i64;2] { return [1,2]; } fn main() {}",
         "fn main() { printi(len(42)); }",
         "fn main() { printi(len([1,2])); }",
         "fn main() { let a=[1]; a=[true]; }",

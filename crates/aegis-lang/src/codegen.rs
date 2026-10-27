@@ -27,6 +27,7 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
         vars: Vec::new(),
         slots: 0,
         peak_slots: 0,
+        aggregate_result: false,
         stack: 0,
         loops: Vec::new(),
         printi: 0,
@@ -41,11 +42,18 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
     for (index, function) in program.functions.iter().enumerate() {
         g.offsets[index] = g.code.len();
         g.vars.clear();
-        g.slots = 0;
-        g.peak_slots = 0;
+        g.aggregate_result = function.result.aggregate();
+        g.slots = usize::from(g.aggregate_result);
+        g.peak_slots = g.slots;
         g.stack = 0;
         g.bytes(&[0x55, 0x48, 0x89, 0xe5, 0x48, 0x81, 0xec]);
         let frame = g.hole();
+        if g.aggregate_result {
+            // Hidden caller-owned result buffer; keep it separate from the
+            // 256 source-visible slots and preserve it across nested calls.
+            g.bytes(&[0x4c, 0x89, 0x95]);
+            g.dword((-8i32) as u32);
+        }
         for (i, param) in function.params.iter().enumerate() {
             let slot = g.declare(&param.name, param.ty.clone(), &function.span)?;
             if i >= 4 {
@@ -85,7 +93,9 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
         // lexical scopes share space; reserve only the maximum live count.
         let frame_size = (g.peak_slots * 8).next_multiple_of(16) as u32;
         g.code[frame..frame + 4].copy_from_slice(&frame_size.to_le_bytes());
-        if function.result == Type::Str {
+        if g.aggregate_result {
+            g.bytes(&[0x0f, 0x0b]); // Definite-return checking makes this unreachable.
+        } else if function.result == Type::Str {
             g.string_literal("")?;
         } else {
             g.bytes(&[0x31, 0xc0]);
@@ -120,6 +130,7 @@ struct Generator<'a> {
     vars: Vec<(String, usize)>,
     slots: usize,
     peak_slots: usize,
+    aggregate_result: bool,
     stack: usize,
     loops: Vec<Loop>,
     printi: usize,
@@ -208,7 +219,7 @@ impl Generator<'_> {
         if self.vars.iter().any(|(n, _)| n == name) {
             return Err(self.error(span, format!("variable already defined: {name}")));
         }
-        if self.slots + ty.slots() > 256 {
+        if self.slots + ty.slots() > 256 + usize::from(self.aggregate_result) {
             return Err(self.error(span, "local variable limit exceeded"));
         }
         let slot = self.slots;
@@ -241,6 +252,13 @@ impl Generator<'_> {
         self.vars.truncate(scope);
         self.slots = slots;
         Ok(())
+    }
+    fn restore_stack(&mut self, stack: usize) {
+        if self.stack > stack {
+            self.bytes(&[0x48, 0x81, 0xc4]);
+            self.dword(((self.stack - stack) * 8) as u32);
+            self.stack = stack;
+        }
     }
     fn snapshot_store(&mut self, end: usize, offset: usize) {
         self.bytes(&[0x48, 0x89, 0x84, 0x24]);
@@ -282,6 +300,7 @@ impl Generator<'_> {
                 }
             }
             _ => {
+                let initial_stack = self.stack;
                 self.expr(value)?;
                 if value.ty.aggregate() {
                     self.bytes(&[0x48, 0x89, 0xc1]);
@@ -293,6 +312,7 @@ impl Generator<'_> {
                 } else {
                     self.snapshot_store(end, offset);
                 }
+                self.restore_stack(initial_stack);
             }
         }
         Ok(())
@@ -408,9 +428,24 @@ impl Generator<'_> {
                     self.bytes(&[0x48, 0x89, 0x01]);
                 }
             }
-            StmtKind::Expr(expr) => self.expr(expr)?,
-            StmtKind::Return(expr) => {
+            StmtKind::Expr(expr) => {
+                let initial_stack = self.stack;
                 self.expr(expr)?;
+                self.restore_stack(initial_stack);
+            }
+            StmtKind::Return(expr) => {
+                if self.aggregate_result {
+                    self.snapshot(expr)?;
+                    self.local(0x8b, 0);
+                    self.bytes(&[0x48, 0x89, 0xc1]);
+                    for index in 0..expr.ty.slots() {
+                        self.pop(&[0x58]);
+                        self.bytes(&[0x48, 0x89, 0x81]);
+                        self.dword((index * 8) as u32);
+                    }
+                } else {
+                    self.expr(expr)?;
+                }
                 self.bytes(&[0xc9, 0xc3]);
             }
             StmtKind::Block(body) => self.block(body)?,
@@ -571,6 +606,13 @@ impl Generator<'_> {
                     ));
                 }
                 let initial_stack = self.stack;
+                if expr.ty.aggregate() {
+                    self.bytes(&[0x31, 0xc0]);
+                    for _ in 0..expr.ty.slots() {
+                        self.push();
+                    }
+                }
+                let result_stack = self.stack;
                 let mut locations = Vec::with_capacity(args.len());
                 let aggregates = args.iter().any(|arg| arg.ty.aggregate());
                 for arg in args {
@@ -583,7 +625,7 @@ impl Generator<'_> {
                     self.push();
                     locations.push(self.stack);
                 }
-                if args.len() > 4 || aggregates {
+                if args.len() > 4 || aggregates || expr.ty.aggregate() {
                     // Preserve evaluated arguments above a separate outgoing
                     // call area. Nested calls cannot overwrite these values.
                     let base = 32 + args.len().saturating_sub(4) * 8;
@@ -609,12 +651,20 @@ impl Generator<'_> {
                             self.dword((32 + (arg - 4) * 8) as u32);
                         }
                     }
+                    if expr.ty.aggregate() {
+                        self.bytes(&[0x4c, 0x8d, 0x94, 0x24]);
+                        self.dword((amount + (self.stack - result_stack) * 8) as u32);
+                    }
                     self.bytes(&[0xe8]);
                     let at = self.hole();
                     self.calls.push((at, index));
                     self.bytes(&[0x48, 0x81, 0xc4]);
-                    self.dword((amount + (self.stack - initial_stack) * 8) as u32);
-                    self.stack = initial_stack;
+                    self.dword((amount + (self.stack - result_stack) * 8) as u32);
+                    self.stack = result_stack;
+                    if expr.ty.aggregate() {
+                        self.bytes(&[0x48, 0x89, 0xe0]);
+                    }
+                    debug_assert!(self.stack >= initial_stack);
                     return Ok(());
                 }
                 for arg in (0..args.len()).rev() {

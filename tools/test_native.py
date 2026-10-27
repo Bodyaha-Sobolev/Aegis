@@ -86,6 +86,24 @@ def main():
         ('len_preserves_bounds', 'fn main() { let a=[[1;3];2]; printi(len(a[2])); }', b'', 72),
         ('composite_full_frame', 'struct P { x:i64,y:i64 } fn f(a:[P;128]) { printi(a[127].x); printi(a[127].y); } fn main() { let a=[P { y:2,x:1 };128]; f(a); a[127]=a[0]; printi(a[127].y); }', b'1\n2\n2\n', 0),
     ])
+    cases.extend([
+        ('return_struct', 'struct P { x:i64,s:str } fn make(n)->P { return P { s:"hello",x:n }; } fn main() { let p=make(42); println(p.s); printi(p.x); }', b'hello\n42\n', 0),
+        ('return_array', 'fn make(n)->[i64;3] { return [n,n+1,n+2]; } fn main() { let a=make(7); printi(a[0]); printi(a[2]); a=make(9); printi(a[1]); }', b'7\n9\n10\n', 0),
+        ('return_nested_calls', 'struct P { x:i64,y:i64 } fn make(n)->P { return P { x:n,y:n+1 }; } fn update(p:P)->P { p.x=p.x+10; return p; } fn score(p:P) { return p.x+p.y; } fn main() { let p=update(make(2)); printi(score(update(p))); printi(p.x); printi(score(make(5))); }', b'25\n12\n11\n', 0),
+        ('return_repeat_once', 'struct P { x:i64 } fn make()->P { printi(7); return P { x:9 }; } fn main() { let a=[make();3]; printi(a[2].x); }', b'7\n9\n', 0),
+        ('return_recursive', 'struct P { x:i64 } fn make(n)->P { if(n==0) { return P { x:7 }; } let p=make(n-1); p.x=p.x+1; return p; } fn main() { let p=make(64); printi(p.x); }', b'71\n', 0),
+        ('return_branches', 'fn make(n)->[str;2] { if(n) { return ["yes";2]; } else { return ["no";2]; } } fn main() { let a=make(1); let b=make(0); println(a[1]); println(b[0]); }', b'yes\nno\n', 0),
+        ('return_stack_arguments', 'struct P { x:i64,y:i64 } fn make(a,b,c,d,e,f)->P { return P { y:f,x:a+b+c+d+e }; } fn main() { let p=make(1,2,3,4,5,6); printi(p.x); printi(p.y); }', b'15\n6\n', 0),
+        ('return_matrix', 'fn make()->[[u64;2];2] { return [[0xffffffffffffffff;2];2]; } fn main() { let a=make(); printi(a[1][1]); }', b'18446744073709551615\n', 0),
+        ('return_full_frame', 'fn make(a:[i64;256])->[i64;256] { a[255]=99; return a; } fn main() { let a=make([7;256]); printi(a[0]); printi(a[255]); }', b'7\n99\n', 0),
+        ('return_discard_cleanup', 'struct P { x:i64 } fn make()->P { return P { x:7 }; } fn main() { let i=0; while(i<500000) { make(); i=i+1; } let p=make(); printi(p.x); }', b'7\n', 0),
+        ('return_field_assignment', 'struct P { x:i64 } struct E { p:P } fn make(n)->P { return P { x:n }; } fn main() { let e=E { p:make(1) }; e.p=make(42); printi(e.p.x); }', b'42\n', 0),
+    ])
+    return_params=','.join(f'a{i}' for i in range(32))
+    return_values=','.join(str(i) for i in range(32))
+    return_sum='+'.join(f'a{i}' for i in range(32))
+    cases.append(('return_32_arguments', 'struct P { x:i64 } fn make('+return_params+')->P { return P { x:'+return_sum+' }; } fn main() { let p=make('+return_values+'); printi(p.x); }', b'496\n', 0))
+    cases.append(('return_nested_constructor', 'struct P { x:i64 } struct W { items:[P;2],name:str } fn make(n)->P { printi(n); return P { x:n }; } fn world()->W { return W { name:"world",items:[make(1),make(2)] }; } fn main() { let w=world(); println(w.name); printi(w.items[0].x+w.items[1].x); }', b'1\n2\nworld\n3\n', 0))
     errors = [
         ('empty_binary', 'fn main() { return 0b; }', b'integer literal'),
         ('bad_binary', 'fn main() { return 0b102; }', b'ERROR'),
