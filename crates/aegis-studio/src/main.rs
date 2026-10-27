@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 mod document;
+mod editor_project;
 mod highlighting;
 mod inspector;
 mod navigation;
@@ -26,8 +27,14 @@ const ACCENT: Color32 = Color32::from_rgb(116, 218, 193);
 const MUTED: Color32 = Color32::from_rgb(137, 151, 171);
 
 enum Event {
-    Analyzed(u64, u64, Result<Vec<FunctionInfo>, Diagnostic>),
+    Analyzed(
+        u64,
+        u64,
+        editor_project::Stamp,
+        Result<Vec<FunctionInfo>, Diagnostic>,
+    ),
     Built {
+        stamp: editor_project::Stamp,
         id: u64,
         revision: u64,
         path: PathBuf,
@@ -95,6 +102,8 @@ struct Studio {
     screenshot: Option<PathBuf>,
     inspector: Option<inspector::Inspector>,
     inspecting: bool,
+    project_entry: Option<PathBuf>,
+    analysis_stamp: Option<editor_project::Stamp>,
 }
 impl Default for Studio {
     fn default() -> Self {
@@ -132,6 +141,8 @@ impl Default for Studio {
             screenshot: None,
             inspector: None,
             inspecting: false,
+            project_entry: None,
+            analysis_stamp: None,
         }
     }
 }
@@ -213,7 +224,18 @@ impl Studio {
         ));
         self.active = self.docs.len() - 1;
     }
+    fn remember_entry(&mut self, path: &Path) {
+        if path.file_name().is_some_and(|name| name == "main.ae")
+            && self
+                .project_entry
+                .as_ref()
+                .is_none_or(|entry| entry.parent().is_none_or(|root| !path.starts_with(root)))
+        {
+            self.project_entry = Some(path.to_owned());
+        }
+    }
     fn add_opened(&mut self, path: PathBuf, text: String, protected: bool) {
+        self.remember_entry(&path);
         let id = self.next_id;
         self.next_id += 1;
         self.docs
@@ -240,6 +262,7 @@ impl Studio {
             .position(|d| d.path.as_ref() == Some(&path))
         {
             self.active = index;
+            self.remember_entry(&path);
             return;
         }
         match storage::read_bounded(&path, aegis_lang::MAX_SOURCE + codec::OVERHEAD) {
@@ -329,6 +352,18 @@ impl Studio {
         }
         true
     }
+    fn open_location(&mut self, path: Option<PathBuf>, offset: usize) {
+        if let Some(path) = path {
+            let path = path.canonicalize().unwrap_or(path);
+            self.open_path(path.clone());
+            if self.docs.get(self.active).and_then(|doc| doc.path.as_ref()) != Some(&path) {
+                return;
+            }
+        }
+        if let Some(doc) = self.docs.get_mut(self.active) {
+            doc.jump_to = Some(offset);
+        }
+    }
     fn build(&mut self, run: bool) {
         if self.busy || self.run.is_some() || self.unlock.is_some() {
             return;
@@ -336,7 +371,16 @@ impl Studio {
         let Some(doc) = self.docs.get(self.active) else {
             return;
         };
-        let path = if let Some(path) = &doc.path {
+        let snapshot =
+            match editor_project::Snapshot::new(&self.docs, self.active, &self.project_entry) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            };
+        let stamp = editor_project::Stamp::new(&self.docs, &self.project_entry);
+        let path = if let Some(path) = &snapshot.entry {
             let mut name = path.as_os_str().to_os_string();
             name.push(".exe");
             PathBuf::from(name)
@@ -348,7 +392,6 @@ impl Studio {
         };
         let id = doc.id;
         let revision = doc.revision;
-        let text = Zeroizing::new(doc.text.clone());
         let events = self.sender.clone();
         self.busy = true;
         self.output.clear();
@@ -356,13 +399,15 @@ impl Studio {
         self.log("AEGIS / native Windows x64\n");
         std::thread::spawn(move || {
             let started = Instant::now();
-            let result = aegis_lang::compile(&text)
+            let result = snapshot
+                .compile()
                 .map_err(|e| e.to_string())
                 .and_then(|build| {
                     storage::atomic_write(&path, &build.executable).map_err(|e| e.to_string())?;
                     Ok((build.functions.len(), build.code_bytes, started.elapsed()))
                 });
             let _ = events.send(Event::Built {
+                stamp,
                 id,
                 revision,
                 path,
@@ -405,8 +450,14 @@ impl Studio {
                         Err(error) => self.fail(error),
                     }
                 }
-                Event::Analyzed(id, revision, result) => {
+                Event::Analyzed(id, revision, stamp, result) => {
                     self.analyzing = false;
+                    if stamp != editor_project::Stamp::new(&self.docs, &self.project_entry) {
+                        if let Some(doc) = self.docs.get_mut(self.active) {
+                            doc.analyze_after = Some(Instant::now());
+                        }
+                        continue;
+                    }
                     if let Some(doc) = self
                         .docs
                         .iter_mut()
@@ -425,6 +476,7 @@ impl Studio {
                     }
                 }
                 Event::Built {
+                    stamp,
                     id,
                     revision,
                     path,
@@ -442,6 +494,8 @@ impl Studio {
                                 .docs
                                 .iter()
                                 .any(|d| d.id == id && d.revision != revision)
+                                || stamp
+                                    != editor_project::Stamp::new(&self.docs, &self.project_entry)
                             {
                                 self.log("The editor changed during the build; this executable uses the earlier snapshot.\n");
                             }
@@ -472,6 +526,14 @@ impl Studio {
                         }
                         Ok(()) => {
                             if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+                                let was_entry = self
+                                    .project_entry
+                                    .as_ref()
+                                    .is_some_and(|entry| doc.path.as_ref() == Some(entry));
+                                let path = path.canonicalize().unwrap_or(path);
+                                if was_entry {
+                                    self.project_entry = Some(path.clone());
+                                }
                                 doc.saved(revision, path, protected);
                             }
                             self.status = "Source saved".into();
@@ -519,6 +581,15 @@ impl Studio {
         }
     }
     fn analyze(&mut self) {
+        let stamp = editor_project::Stamp::new(&self.docs, &self.project_entry);
+        if self.analysis_stamp.as_ref() != Some(&stamp) {
+            for doc in &mut self.docs {
+                if doc.analyze_after.is_none() {
+                    doc.analyze_after = Some(Instant::now() + Duration::from_millis(400));
+                }
+            }
+            self.analysis_stamp = Some(stamp.clone());
+        }
         if self.analyzing {
             return;
         }
@@ -532,11 +603,27 @@ impl Studio {
         self.analyzing = true;
         let id = doc.id;
         let revision = doc.revision;
-        let source = Zeroizing::new(doc.text.clone());
+        let snapshot =
+            match editor_project::Snapshot::new(&self.docs, self.active, &self.project_entry) {
+                Ok(snapshot) => snapshot,
+                Err(message) => {
+                    self.analyzing = false;
+                    if let Some(doc) = self.docs.get_mut(self.active) {
+                        doc.diagnostic = Some(Diagnostic {
+                            message,
+                            path: None,
+                            span: 0..0,
+                            line: 1,
+                            column: 1,
+                        });
+                    }
+                    return;
+                }
+            };
         let events = self.sender.clone();
         std::thread::spawn(move || {
-            let result = aegis_lang::analyze(&source);
-            let _ = events.send(Event::Analyzed(id, revision, result));
+            let result = snapshot.compile().map(|build| build.functions);
+            let _ = events.send(Event::Analyzed(id, revision, stamp, result));
         });
     }
     fn find_next(&mut self) {
@@ -722,9 +809,24 @@ impl Studio {
                             }
                             ui.close();
                         }
+                        if ui.button("Use active file as project entry").clicked() {
+                            self.project_entry =
+                                self.docs.get(self.active).and_then(|doc| doc.path.clone());
+                            self.analysis_stamp = None;
+                            ui.close();
+                        }
+                        if ui.button("Clear project entry").clicked() {
+                            self.project_entry = None;
+                            self.analysis_stamp = None;
+                            ui.close();
+                        }
                         if ui.button("Open project folder…").clicked() {
                             if let Some(path) = rfd::FileDialog::new().pick_folder() {
                                 self.files = project_files(&path);
+                                let entry = path.join("main.ae");
+                                self.project_entry = entry
+                                    .is_file()
+                                    .then(|| entry.canonicalize().unwrap_or(entry));
                                 self.workspace = Some(path);
                             }
                             ui.close();
@@ -873,7 +975,10 @@ impl Studio {
             else { ui.label(RichText::new("Open a project folder\nfrom the File menu.").small().color(MUTED)); }
             ui.horizontal(|ui| {
                 if ui.add_enabled(self.workspace.is_some(), egui::Button::new("Refresh")).clicked()
-                    && let Some(root) = &self.workspace { self.files = project_files(root); }
+                    && let Some(root) = &self.workspace {
+                        self.files = project_files(root); self.analysis_stamp = None;
+                        for doc in &mut self.docs { doc.analyze_after = Some(Instant::now()); }
+                    }
                 if ui.button("Find file").on_hover_text("Ctrl+P").clicked() { self.open_navigator(true); }
             });
             let mut open=None;
@@ -886,15 +991,21 @@ impl Studio {
             if let Some(path)=open { self.open_path(path); }
             ui.add_space(18.0); ui.separator(); ui.add_space(8.0);
             ui.label(RichText::new("SYMBOLS").small().strong().color(MUTED));
+            if let Some(entry) = &self.project_entry { ui.label(RichText::new(format!("Entry: {}", entry.file_name().unwrap_or_default().to_string_lossy())).small().color(MUTED)).on_hover_text(entry.display().to_string()); }
+            let mut location = None;
+            egui::ScrollArea::vertical().id_salt("project-symbols").max_height((ui.available_height()-145.0).max(80.0)).show(ui, |ui| {
             if let Some(doc)=self.docs.get_mut(self.active) {
                 for function in &doc.functions {
-                    if ui.selectable_label(false,RichText::new(format!("ƒ  {}",function.signature)).monospace()).clicked() { doc.jump_to=Some(function.span.start); }
+                    if ui.selectable_label(false,RichText::new(format!("ƒ  {}",function.signature)).monospace()).clicked() { location=Some((function.path.clone(),function.span.start)); }
                 }
                 if let Some(error)=&doc.diagnostic {
                     ui.add_space(14.0); ui.label(RichText::new("PROBLEM").small().color(Color32::from_rgb(249,131,142)));
-                    if ui.link(format!("{}:{}  {}",error.line,error.column,error.message)).clicked() { doc.jump_to=Some(error.span.start); }
+                    if let Some(path) = &error.path { ui.label(RichText::new(path.display().to_string()).small()); }
+                    if ui.link(format!("{}:{}  {}",error.line,error.column,error.message)).clicked() { location=Some((error.path.clone(),error.span.start)); }
                 }
             }
+            });
+            if let Some((path, offset)) = location { self.open_location(path, offset); }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT),|ui| {
                 ui.label(RichText::new(concat!("AEGIS ", env!("CARGO_PKG_VERSION"), "\nNative compiler + editor\n\nCtrl+P  Find file\nCtrl+G  Go to line\nCtrl+F  Find\nCtrl+S  Save\nF6  Build\nF5  Build and run")).small().color(MUTED));
             });
@@ -1423,6 +1534,53 @@ mod tests {
         assert_eq!(app.docs.len(), 1);
     }
     #[test]
+    fn dependency_edits_invalidate_project_analysis() {
+        let ctx = egui::Context::default();
+        let mut app = Studio::default();
+        app.docs
+            .push(Document::new(2, None, "fn helper() {}".into(), false));
+        let stamp = editor_project::Stamp::new(&app.docs, &app.project_entry);
+        app.docs[1].changed();
+        app.analyzing = true;
+        app.sender
+            .send(Event::Analyzed(
+                1,
+                0,
+                stamp,
+                Err(Diagnostic {
+                    message: "stale dependency".into(),
+                    path: None,
+                    span: 0..0,
+                    line: 1,
+                    column: 1,
+                }),
+            ))
+            .expect("event");
+        app.receive(&ctx);
+        assert!(app.docs[0].diagnostic.is_none());
+        assert!(!app.analyzing);
+        assert!(app.docs[0].analyze_after.is_some());
+    }
+    #[test]
+    fn project_locations_switch_buffers_without_overwriting_unsaved_text() {
+        let dir = tempfile::tempdir().expect("dir");
+        let entry = dir.path().join("main.ae");
+        let child = dir.path().join("child.ae");
+        std::fs::write(&entry, "mod child; fn main() {}").expect("entry");
+        std::fs::write(&child, "fn helper() {}").expect("child");
+        let mut app = Studio::default();
+        app.open_path(entry);
+        app.open_location(Some(child.clone()), 3);
+        assert_eq!(app.docs[app.active].jump_to, Some(3));
+        app.docs[app.active].text = "unsaved child".into();
+        app.docs[app.active].changed();
+        app.open_location(Some(child), 7);
+        assert_eq!(app.docs[app.active].text, "unsaved child");
+        assert_eq!(app.docs[app.active].jump_to, Some(7));
+        app.open_location(Some(dir.path().join("missing.ae")), 99);
+        assert_eq!(app.docs[app.active].jump_to, Some(7));
+    }
+    #[test]
     fn stale_analysis_is_ignored() {
         let ctx = egui::Context::default();
         let mut app = Studio::default();
@@ -1432,8 +1590,10 @@ mod tests {
             .send(Event::Analyzed(
                 1,
                 0,
+                editor_project::Stamp::new(&app.docs, &app.project_entry),
                 Err(Diagnostic {
                     message: "stale".into(),
+                    path: None,
                     span: 0..0,
                     line: 1,
                     column: 1,

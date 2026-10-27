@@ -1,4 +1,4 @@
-use aegis_lang::{codec, compile, pe, storage};
+use aegis_lang::{codec, pe, project, storage};
 use std::{
     ffi::OsString,
     io::Write,
@@ -116,7 +116,18 @@ fn execute(args: Vec<OsString>) -> Result<(), String> {
     let output = match command {
         "build" => {
             let text = std::str::from_utf8(&source).map_err(|_| "source must be UTF-8")?;
-            let build = compile(text).map_err(|e| e.to_string())?;
+            let build = project::compile(&paths[0], text, &[]).map_err(|e| e.to_string())?;
+            let destination = paths
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| paths[0].with_extension("exe"));
+            if build
+                .sources
+                .iter()
+                .any(|source| same_file(source, &destination))
+            {
+                return Err("output path must differ from every project source".into());
+            }
             println!(
                 "Compiled {} functions, {} bytes of native code",
                 build.functions.len(),
@@ -125,8 +136,12 @@ fn execute(args: Vec<OsString>) -> Result<(), String> {
             build.executable
         }
         "check" => {
-            compile(std::str::from_utf8(&source).map_err(|_| "source must be UTF-8")?)
-                .map_err(|e| e.to_string())?;
+            project::compile(
+                &paths[0],
+                std::str::from_utf8(&source).map_err(|_| "source must be UTF-8")?,
+                &[],
+            )
+            .map_err(|e| e.to_string())?;
             println!("OK: source checked");
             return Ok(());
         }

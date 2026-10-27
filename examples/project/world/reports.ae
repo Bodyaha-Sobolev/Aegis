@@ -1,0 +1,1 @@
+fn score(point: Point) { return math::squared(point.x, point.y); }

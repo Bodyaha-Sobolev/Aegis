@@ -108,6 +108,7 @@ pub(crate) struct Function {
 }
 #[derive(Debug, Clone)]
 pub struct FunctionInfo {
+    pub path: Option<std::path::PathBuf>,
     pub name: String,
     pub parameters: usize,
     pub signature: String,
@@ -116,6 +117,7 @@ pub struct FunctionInfo {
 impl From<&Function> for FunctionInfo {
     fn from(f: &Function) -> Self {
         Self {
+            path: None,
             name: f.name.clone(),
             parameters: f.params.len(),
             signature: format!(

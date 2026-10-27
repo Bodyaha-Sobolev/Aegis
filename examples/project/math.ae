@@ -1,0 +1,1 @@
+fn squared(x: i64, y: i64) { return x*x + y*y; }

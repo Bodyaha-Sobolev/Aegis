@@ -286,6 +286,35 @@ def main():
             result = run(exe)
             assert (result.stdout, result.returncode) == (expected, code), (name, result.stdout, result.stderr, result.returncode)
             print('PASS', name)
+        project_folder=folder/'project'
+        project_folder.mkdir()
+        (project_folder/'world').mkdir()
+        entry=project_folder/'main.ae'
+        entry.write_text('mod world; fn main() { printi(world::value()); }',encoding='utf-8')
+        module=project_folder/'world.ae'
+        module.write_text('mod math; fn value() { return math::double(21); }',encoding='utf-8')
+        child=project_folder/'world/math.ae'
+        child.write_text('fn double(n) { return n*2; }',encoding='utf-8')
+        project_exe=project_folder/'program.exe'
+        result=run(COMPILER,'build',entry,project_exe)
+        assert result.returncode==0,(result.stdout,result.stderr)
+        assert run(project_exe).stdout==b'42\n'
+        print('PASS native multi-file project')
+        result=run(COMPILER,'check',entry)
+        assert result.returncode==0,(result.stdout,result.stderr)
+        print('PASS project check command')
+        before=module.read_bytes()
+        result=run(COMPILER,'build',entry,module)
+        assert result.returncode==2 and module.read_bytes()==before
+        print('PASS module output collision preserves source')
+        child.write_text('// привет\nfn double(n) { return missing; }',encoding='utf-8')
+        result=run(COMPILER,'check',entry)
+        assert result.returncode==2 and b'ERROR 2:' in result.stderr and b'math.ae' in result.stderr,(result.stdout,result.stderr)
+        print('PASS dependency diagnostic has file and original location')
+        child.unlink()
+        result=run(COMPILER,'check',entry)
+        assert result.returncode==2 and b'cannot load module' in result.stderr
+        print('PASS missing project dependency rejected')
         inspected = folder/'strings_example.exe'
         before = inspected.read_bytes()
         report = run(COMPILER, 'inspect', inspected)
@@ -310,7 +339,8 @@ def main():
         key.write_bytes(os.urandom(32))
         wrong_key.write_bytes(os.urandom(32))
         src, enc, dec, exe = (folder/n for n in ('protected.ae','protected.aeg','restored.ae','protected.exe'))
-        src.write_bytes(b'fn main() { printi(123); return 0; }')
+        (folder/'protected_helper.ae').write_text('fn value() { return 123; }',encoding='utf-8')
+        src.write_bytes(b'mod protected_helper; fn main() { printi(protected_helper::value()); return 0; }')
         result = run(COMPILER, 'enc', src, enc, '-k', key, '-c', '0xABC', timeout=30)
         assert result.returncode == 0 and enc.exists(), (result.stdout, result.returncode)
         result = run(COMPILER, 'dec', enc, dec, '-k', key, '-c', '0xABC', timeout=30)
@@ -350,7 +380,7 @@ def main():
             result = run(COMPILER, *args)
             assert result.returncode == 2, (args, result.stdout, result.returncode)
         print('PASS invalid CLI commands and dialects')
-    print(f'{len(cases) + len(errors) + 12} checks passed')
+    print(f'{len(cases) + len(errors) + 17} checks passed')
 
 
 if __name__ == '__main__':

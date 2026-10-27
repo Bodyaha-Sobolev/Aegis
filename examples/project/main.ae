@@ -1,0 +1,9 @@
+mod math;
+mod world;
+fn main() {
+    let point = world::initial();
+    printi(world::reports::score(point));
+    let moved = world::move(point, 2);
+    printi(world::reports::score(moved));
+    printi(math::squared(6, 8));
+}

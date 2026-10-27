@@ -1,0 +1,7 @@
+mod reports;
+struct Point { x: i64, y: i64 }
+fn initial() -> Point { return Point { x: 3, y: 4 }; }
+fn move(point: Point, dx: i64) -> Point {
+    point.x = point.x + dx;
+    return point;
+}
