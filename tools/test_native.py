@@ -70,6 +70,22 @@ def main():
         ('array_field_check_order', 'struct E { a:[i64;2] } fn seed() { printi(99); return 1; } fn main() { let e=E { a:[1;2] }; e.a[2]=seed(); }', b'', 72),
         ('nested_full_frame', 'struct P { a:[i64;128] } struct E { left:P,right:P } fn f(e:E) { printi(e.left.a[127]); printi(e.right.a[127]); } fn main() { let e=E { right:P { a:[2;128] },left:P { a:[1;128] } }; f(e); e.left=e.right; printi(e.left.a[127]); }', b'1\n2\n2\n', 0),
     ])
+    cases.extend([
+        ('struct_array_values', 'struct P { x:i64,y:i64 } fn main() { let a=[P { x:1,y:2 },P { y:4,x:3 }]; printi(len(a)); printi(a[1].y); a[0]=a[1]; a[1].x=99; printi(a[0].x); printi(a[1].x); }', b'2\n4\n3\n99\n', 0),
+        ('struct_array_repeat_once', 'struct P { x:i64,y:i64 } fn seed(n) { printi(n); return n; } fn main() { let a=[P { y:seed(2),x:seed(1) };3]; printi(a[2].x+a[2].y); a[1].x=99; printi(a[0].x); }', b'2\n1\n3\n1\n', 0),
+        ('struct_array_arguments', 'struct P { x:i64,y:i64 } fn f(a:[P;2],b,c,d,e) { printi(a[0].x+a[1].y+b+c+d+e); a[0].x=99; } fn main() { let a=[P { x:1,y:2 };2]; f(a,3,4,5,6); printi(a[0].x); }', b'21\n1\n', 0),
+        ('matrix_copy', 'fn main() { let a=[[1,2,3],[4,5,6]]; printi(len(a)); printi(len(a[0])); a[0]=a[1]; a[1][0]=99; printi(a[0][0]); printi(a[1][0]); a[0]=[a[0][2],a[0][1],a[0][0]]; printi(a[0][0]); printi(a[0][2]); }', b'2\n3\n4\n99\n6\n4\n', 0),
+        ('matrix_repeat_once', 'fn seed() { printi(7); return 3; } fn main() { let a=[[seed();2];3]; printi(a[2][1]); a[1][0]=99; printi(a[0][0]); }', b'7\n3\n3\n', 0),
+        ('matrix_argument', 'fn f(a:[[u64;2];2])->u64 { a[0][0]=0; return a[1][1]; } fn main() { let a:[[u64;2];2]=[[0xffffffffffffffff;2];2]; printi(f(a)); printi(a[0][0]); }', b'18446744073709551615\n18446744073709551615\n', 0),
+        ('composite_world', 'struct P { x:i64, tags:[str;2] } struct W { actors:[P;2] } fn main() { let w=W { actors:[P { tags:["a","b"],x:7 };2] }; println(w.actors[1].tags[0]); w.actors[1].tags[0]="new"; println(w.actors[0].tags[0]); println(w.actors[1].tags[0]); printi(w.actors[1].tags[1][0]); }', b'a\na\nnew\n98\n', 0),
+        ('matrix_inner_bounds', 'fn main() { let a=[[1;3];2]; printi(a[0][3]); }', b'', 72),
+        ('matrix_outer_bounds', 'fn main() { let a=[[1;3];2]; printi(a[2][0]); }', b'', 72),
+        ('matrix_assignment_bounds_order', 'fn seed() { printi(99); return 1; } fn main() { let a=[[1;3];2]; a[2]=[seed();3]; }', b'', 72),
+        ('matrix_index_order', 'fn seed(n) { printi(n); return n; } fn main() { let a=[[1;3];2]; printi(a[seed(1)][seed(2)]); }', b'1\n2\n1\n', 0),
+        ('len_preserves_index_effects', 'fn seed() { printi(7); return 0; } fn main() { let a=[[1;3];2]; printi(len(a[seed()])); }', b'7\n3\n', 0),
+        ('len_preserves_bounds', 'fn main() { let a=[[1;3];2]; printi(len(a[2])); }', b'', 72),
+        ('composite_full_frame', 'struct P { x:i64,y:i64 } fn f(a:[P;128]) { printi(a[127].x); printi(a[127].y); } fn main() { let a=[P { y:2,x:1 };128]; f(a); a[127]=a[0]; printi(a[127].y); }', b'1\n2\n2\n', 0),
+    ])
     errors = [
         ('empty_binary', 'fn main() { return 0b; }', b'integer literal'),
         ('bad_binary', 'fn main() { return 0b102; }', b'ERROR'),

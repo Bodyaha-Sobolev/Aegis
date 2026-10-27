@@ -167,8 +167,14 @@ impl Checker<'_> {
             if expected.as_ref().is_some_and(|ty| ty.element().is_none()) {
                 return Err(self.error(&expr.span, "type mismatch: expected scalar, found array"));
             }
-            let element = self.scalar(value, expected.as_ref().and_then(|ty| ty.element()))?;
-            let ty = Type::array(element, *count).expect("scalar array element");
+            let element =
+                self.aggregate_value(value, expected.as_ref().and_then(|ty| ty.element()))?;
+            let ty = Type::array(element, *count).ok_or_else(|| {
+                self.error(
+                    &expr.span,
+                    "array layout limit exceeded (256 slots or 32 levels)",
+                )
+            })?;
             if let Some(expected) = expected.as_ref()
                 && *expected != ty
             {
@@ -192,15 +198,21 @@ impl Checker<'_> {
             let element = expected
                 .as_ref()
                 .and_then(|ty| ty.element())
-                .or_else(|| values.iter().find_map(|v| self.hint(v)))
-                .unwrap_or(Type::I64);
-            if element.aggregate() {
-                return Err(self.error(&expr.span, "nested arrays are not supported yet"));
-            }
+                .or_else(|| values.iter().find_map(|v| self.hint(v)));
+            let element = if let Some(element) = element {
+                element
+            } else {
+                self.aggregate_value(&mut values[0], None)?
+            };
             for value in values.iter_mut() {
-                self.scalar(value, Some(element.clone()))?;
+                self.aggregate_value(value, Some(element.clone()))?;
             }
-            let ty = Type::array(element, values.len()).expect("scalar array element");
+            let ty = Type::array(element, values.len()).ok_or_else(|| {
+                self.error(
+                    &expr.span,
+                    "array layout limit exceeded (256 slots or 32 levels)",
+                )
+            })?;
             if let Some(expected) = expected.as_ref()
                 && *expected != ty
             {
@@ -229,7 +241,13 @@ impl Checker<'_> {
             ExprKind::Number(_) => None,
             ExprKind::Bool(_) => Some(Type::Bool),
             ExprKind::String(_) => Some(Type::Str),
-            ExprKind::Array(_) | ExprKind::Repeat(..) => None,
+            ExprKind::Array(values) => values
+                .iter()
+                .find_map(|value| self.hint(value))
+                .and_then(|element| Type::array(element, values.len())),
+            ExprKind::Repeat(value, count) => self
+                .hint(value)
+                .and_then(|element| Type::array(element, *count)),
             ExprKind::Record(record, _) => Some(Type::Record(record.clone())),
             ExprKind::Field(base, name) => match self.hint(base) {
                 Some(Type::Record(record)) => record

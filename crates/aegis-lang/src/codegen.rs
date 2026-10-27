@@ -266,13 +266,19 @@ impl Generator<'_> {
             }
             ExprKind::Array(values) => {
                 for (index, value) in values.iter().enumerate() {
-                    self.write_snapshot(value, end, offset + index)?;
+                    self.write_snapshot(value, end, offset + index * value.ty.slots())?;
                 }
             }
             ExprKind::Repeat(value, count) => {
-                self.expr(value)?;
-                for index in 0..*count {
-                    self.snapshot_store(end, offset + index);
+                // Compute the element once, including aggregate constructors and
+                // their side effects, then copy the completed element snapshot.
+                self.write_snapshot(value, end, offset)?;
+                for index in 1..*count {
+                    for slot in 0..value.ty.slots() {
+                        self.bytes(&[0x48, 0x8b, 0x84, 0x24]);
+                        self.dword(((self.stack - end + offset + slot) * 8) as u32);
+                        self.snapshot_store(end, offset + index * value.ty.slots() + slot);
+                    }
                 }
             }
             _ => {
@@ -339,7 +345,8 @@ impl Generator<'_> {
             self.bytes(&[0x48, 0x8d, 0x44, 0x01, 0x08]);
             return Ok(());
         }
-        let len = array.ty.slots();
+        let len = array.ty.len().expect("checked array type");
+        let stride = array.ty.element().expect("checked element").slots();
         self.expr(array)?;
         self.push();
         self.expr(index)?;
@@ -349,7 +356,18 @@ impl Generator<'_> {
         self.exit(72);
         self.here(in_bounds);
         self.pop(&[0x59]);
-        self.bytes(&[0x48, 0x8d, 0x04, 0xc1]);
+        if stride == 1 {
+            self.bytes(&[0x48, 0x8d, 0x04, 0xc1]);
+        } else {
+            let bytes = stride * 8;
+            if bytes.is_power_of_two() {
+                self.bytes(&[0x48, 0xc1, 0xe0, bytes.trailing_zeros() as u8]);
+            } else {
+                self.bytes(&[0x48, 0x69, 0xc0]);
+                self.dword(bytes as u32);
+            }
+            self.bytes(&[0x48, 0x01, 0xc8]);
+        }
         Ok(())
     }
     fn statement(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
@@ -499,7 +517,7 @@ impl Generator<'_> {
                 self.index_address(expr)?;
                 if base.ty == Type::Str {
                     self.bytes(&[0x0f, 0xb6, 0x00]);
-                } else {
+                } else if !expr.ty.aggregate() {
                     self.bytes(&[0x48, 0x8b, 0x00]);
                 }
             }
@@ -508,8 +526,9 @@ impl Generator<'_> {
                     self.expr(value)?;
                     self.bytes(&[0x48, 0x8b, 0x00]);
                 } else {
+                    self.expr(value)?; // Preserve index evaluation and bounds errors.
                     self.bytes(&[0xb8]);
-                    self.dword(value.ty.slots() as u32);
+                    self.dword(value.ty.len().expect("checked len array") as u32);
                 }
             }
             ExprKind::Bool(value) => {
@@ -798,7 +817,6 @@ impl Generator<'_> {
 fn constant(expr: &Expr) -> Option<u64> {
     match &expr.kind {
         ExprKind::Number(n) => Some(*n),
-        ExprKind::Len(value) if value.ty != Type::Str => Some(value.ty.slots() as u64),
         ExprKind::Bool(value) => Some(u64::from(*value)),
         ExprKind::Cast(ty, value) => constant(value).map(|n| {
             if *ty == Type::Bool {

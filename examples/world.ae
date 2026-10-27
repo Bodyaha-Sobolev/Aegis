@@ -1,0 +1,33 @@
+struct Position { x: i64, y: i64 }
+struct Actor { position: Position, health: i64 }
+struct World { actors: [Actor; 4], occupied: [[bool; 4]; 4] }
+fn total_health(actors: [Actor; 4]) {
+    let total = 0;
+    let i = 0;
+    while (i < len(actors)) {
+        total = total + actors[i].health;
+        i = i + 1;
+    }
+    return total;
+}
+fn main() {
+    let world = World {
+        actors: [Actor { position: Position { x: 0, y: 0 }, health: 100 }; 4],
+        occupied: [[false; 4]; 4],
+    };
+    let i = 0;
+    while (i < len(world.actors)) {
+        world.actors[i].position.x = i * 3;
+        world.actors[i].health = 100 - i * 10;
+        world.occupied[i][i] = true;
+        i = i + 1;
+    }
+    printi(total_health(world.actors));
+    let copy = world;
+    copy.actors[0].health = 0;
+    printi(total_health(copy.actors));
+    printi(world.actors[0].health);
+    printi(world.actors[3].position.x);
+    printi(world.occupied[3][3]);
+    printi(len(world.occupied));
+}

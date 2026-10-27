@@ -29,8 +29,6 @@ fn invalid_records_fail_equally_in_ide_and_compiler() {
         "struct P { x:i64 } fn main() { let p=P { x:1 }; if(p) {} }",
         "struct P { x:i64 } fn main() { let p=P { x:1 }; printi(p[0]); }",
         "struct P { x:i64 } fn main() { let p=P { x:1 }; printi(len(p)); }",
-        "struct P { x:i64 } fn main() { let p=P { x:1 }; let a=[p]; }",
-        "struct P { x:i64 } fn main() { let p=P { x:1 }; let a=[p;2]; }",
         "struct P { x:i64 } struct Q { x:i64 } fn main() { let p:P=Q { x:1 }; }",
         "struct P { x:i64 } struct Q { x:i64 } fn f(p:P) {} fn main() { f(Q { x:1 }); }",
         "struct P { x:i64 } fn f()->P { return P { x:1 }; } fn main() {}",

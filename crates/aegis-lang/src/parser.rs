@@ -10,15 +10,8 @@ pub(crate) enum Type {
     U64,
     Bool,
     Str,
-    Array(Scalar, usize),
+    Array(Arc<Type>, usize),
     Record(Arc<Record>),
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scalar {
-    I64,
-    U64,
-    Bool,
-    Str,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Record {
@@ -32,29 +25,38 @@ impl Type {
         matches!(self, Self::Array(..) | Self::Record(_))
     }
     pub fn array(element: Self, len: usize) -> Option<Self> {
-        Some(Self::Array(
-            match element {
-                Self::I64 => Scalar::I64,
-                Self::U64 => Scalar::U64,
-                Self::Bool => Scalar::Bool,
-                Self::Str => Scalar::Str,
-                Self::Array(..) | Self::Record(_) => return None,
-            },
-            len,
-        ))
+        if !(1..=256).contains(&len)
+            || element.slots().checked_mul(len)? > 256
+            || element.depth() >= 32
+        {
+            return None;
+        }
+        Some(Self::Array(Arc::new(element), len))
     }
     pub fn element(&self) -> Option<Self> {
+        if let Self::Array(element, _) = self {
+            Some((**element).clone())
+        } else {
+            None
+        }
+    }
+    pub fn len(&self) -> Option<usize> {
+        if let Self::Array(_, len) = self {
+            Some(*len)
+        } else {
+            None
+        }
+    }
+    pub fn depth(&self) -> usize {
         match self {
-            Self::Array(Scalar::I64, _) => Some(Self::I64),
-            Self::Array(Scalar::U64, _) => Some(Self::U64),
-            Self::Array(Scalar::Bool, _) => Some(Self::Bool),
-            Self::Array(Scalar::Str, _) => Some(Self::Str),
-            _ => None,
+            Self::Record(record) => record.depth,
+            Self::Array(element, _) => element.depth() + 1,
+            _ => 0,
         }
     }
     pub fn slots(&self) -> usize {
-        if let Self::Array(_, len) = self {
-            *len
+        if let Self::Array(element, len) = self {
+            element.slots() * len
         } else if let Self::Record(record) = self {
             record.slots
         } else {
@@ -173,7 +175,7 @@ pub(crate) enum ExprKind {
 pub(crate) fn is_place(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Var(_) => true,
-        ExprKind::Field(base, _) => is_place(base),
+        ExprKind::Field(base, _) | ExprKind::Index(base, _) => is_place(base),
         _ => false,
     }
 }
@@ -247,22 +249,22 @@ impl Parser<'_> {
         Ok(name)
     }
     fn type_name(&mut self) -> Result<Type, Diagnostic> {
+        self.enter()?;
+        let result = self.parse_type();
+        self.depth -= 1;
+        result
+    }
+    fn parse_type(&mut self) -> Result<Type, Diagnostic> {
         if self.sym("[") {
-            let element = match self.token().kind {
-                Kind::Keyword(Keyword::I64) => Type::I64,
-                Kind::Keyword(Keyword::U64) => Type::U64,
-                Kind::Keyword(Keyword::Bool) => Type::Bool,
-                Kind::Keyword(Keyword::Str) => Type::Str,
-                _ => return Err(self.error("array element must be i64, u64, bool or str")),
-            };
-            self.at += 1;
+            let element = self.type_name()?;
             self.expect(";")?;
             let Kind::Number(len @ 1..=256) = self.token().kind else {
                 return Err(self.error("array length must be a literal from 1 to 256"));
             };
             self.at += 1;
             self.expect("]")?;
-            return Ok(Type::array(element, len as usize).expect("scalar element"));
+            return Type::array(element, len as usize)
+                .ok_or_else(|| self.error("array layout limit exceeded (256 slots or 32 levels)"));
         }
         if self.token().kind == Kind::Ident {
             let span = self.token().span.clone();
@@ -314,15 +316,7 @@ impl Parser<'_> {
         if slots > 256 {
             return Err(self.error("struct layout limit exceeded (256 slots)"));
         }
-        let depth = fields
-            .iter()
-            .map(|(_, ty)| match ty {
-                Type::Record(record) => record.depth,
-                _ => 0,
-            })
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let depth = fields.iter().map(|(_, ty)| ty.depth()).max().unwrap_or(0) + 1;
         if depth > 32 {
             return Err(self.error("struct nesting limit exceeded (32)"));
         }
