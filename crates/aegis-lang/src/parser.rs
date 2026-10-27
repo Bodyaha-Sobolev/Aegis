@@ -14,6 +14,10 @@ pub(crate) enum Type {
     U64,
     I32,
     U32,
+    I16,
+    U16,
+    I8,
+    U8,
     Bool,
     Str,
     Array(Arc<Type>, usize),
@@ -70,16 +74,38 @@ impl Type {
         }
     }
     pub fn integer(&self) -> bool {
-        matches!(self, Self::I64 | Self::U64 | Self::I32 | Self::U32)
+        matches!(
+            self,
+            Self::I64
+                | Self::U64
+                | Self::I32
+                | Self::U32
+                | Self::I16
+                | Self::U16
+                | Self::I8
+                | Self::U8
+        )
     }
-    // Narrow types live in 8-byte slots as canonical values: i32 is always
-    // sign-extended, u32 always zero-extended. Codegen canonicalizes only at
-    // value producers; bitwise & | ^ on canonical operands stay canonical.
+    // Narrow types live in 8-byte slots as canonical values: signed widths are
+    // always sign-extended, unsigned always zero-extended. Codegen
+    // canonicalizes only at value producers; bitwise & | ^ on canonical
+    // operands stay canonical.
     pub fn unsigned(&self) -> bool {
-        matches!(self, Self::U64 | Self::U32)
+        matches!(self, Self::U64 | Self::U32 | Self::U16 | Self::U8)
     }
     pub fn narrow(&self) -> bool {
-        matches!(self, Self::I32 | Self::U32)
+        matches!(
+            self,
+            Self::I32 | Self::U32 | Self::I16 | Self::U16 | Self::I8 | Self::U8
+        )
+    }
+    pub fn bits(&self) -> u32 {
+        match self {
+            Self::I32 | Self::U32 => 32,
+            Self::I16 | Self::U16 => 16,
+            Self::I8 | Self::U8 => 8,
+            _ => 64,
+        }
     }
 }
 impl std::fmt::Display for Type {
@@ -95,6 +121,10 @@ impl std::fmt::Display for Type {
             Self::U64 => "u64",
             Self::I32 => "i32",
             Self::U32 => "u32",
+            Self::I16 => "i16",
+            Self::U16 => "u16",
+            Self::I8 => "i8",
+            Self::U8 => "u8",
             Self::Bool => "bool",
             Self::Str => "str",
             Self::Array(..) | Self::Record(_) => unreachable!(),
@@ -438,9 +468,17 @@ impl Parser<'_> {
             Kind::Keyword(Keyword::U64) => Type::U64,
             Kind::Keyword(Keyword::I32) => Type::I32,
             Kind::Keyword(Keyword::U32) => Type::U32,
+            Kind::Keyword(Keyword::I16) => Type::I16,
+            Kind::Keyword(Keyword::U16) => Type::U16,
+            Kind::Keyword(Keyword::I8) => Type::I8,
+            Kind::Keyword(Keyword::U8) => Type::U8,
             Kind::Keyword(Keyword::Bool) => Type::Bool,
             Kind::Keyword(Keyword::Str) => Type::Str,
-            _ => return Err(self.error("expected type i64, u64, i32, u32, bool or str")),
+            _ => {
+                return Err(
+                    self.error("expected type i64, u64, i32, u32, i16, u16, i8, u8, bool or str")
+                );
+            }
         };
         self.at += 1;
         Ok(ty)
@@ -952,7 +990,15 @@ impl Parser<'_> {
                 ExprKind::Bool(token.kind == Kind::Keyword(Keyword::True))
             }
             Kind::Keyword(
-                Keyword::I64 | Keyword::U64 | Keyword::I32 | Keyword::U32 | Keyword::Bool,
+                Keyword::I64
+                | Keyword::U64
+                | Keyword::I32
+                | Keyword::U32
+                | Keyword::I16
+                | Keyword::U16
+                | Keyword::I8
+                | Keyword::U8
+                | Keyword::Bool,
             ) => {
                 let ty = self.type_name()?;
                 self.expect("(")?;

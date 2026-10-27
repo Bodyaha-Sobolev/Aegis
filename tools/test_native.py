@@ -293,28 +293,35 @@ def main():
         ('import_wrong_kind', 'fn f() { return 99; } mod a { struct P { x:i64 } } mod app { use a::P as f; fn run() { return f(); } } fn main() {}', b'undefined function'),
         ('import_nominal', 'mod a { struct P { x:i64 } } mod b { struct P { x:i64 } } use a::P as A; use b::P as B; fn main() { let p:A=B { x:1 }; }', b'expected a::P'),
     ])
-    # Narrow 32-bit integers: every result is checked against an independent
-    # Python model of wrapping 32-bit semantics. Untyped literals stay i64, so
-    # two-billion values never need a suffix by default.
-    mask32 = (1 << 32) - 1
-    def i32(n):
-        n &= mask32
-        return n - (1 << 32) if n >= (1 << 31) else n
-    def u32(n):
-        return n & mask32
+    # Narrow integers (i8/u8..i32/u32): every result is checked against an
+    # independent Python model of wrapping width semantics. Untyped literals
+    # stay i64, so two-billion values never need a suffix by default.
+    def make_signed(width):
+        mask = (1 << width) - 1
+
+        def f(n):
+            n &= mask
+            return n - (1 << width) if n >= (1 << (width - 1)) else n
+        return f
+
+    def make_unsigned(width):
+        mask = (1 << width) - 1
+        return lambda n: n & mask
+
     def tdiv(a, b):
         q = abs(a) // abs(b)
         return q if (a < 0) == (b < 0) else -q
+
     def tmod(a, b):
         return a - tdiv(a, b) * b
-    def i32lit(n):
-        n = i32(n)
-        return f'(-{-n})' if n < 0 else str(n)
-    def u32lit(n):
-        return str(u32(n))
+
     i32_values = [0, 1, 2, 5, 31, 100, 0x12345678, 0x7fffffff,
                   -1, -2, -31, -100, -2147483648, 2147483647, -0x12345678]
     u32_values = [0, 1, 2, 5, 31, 100, 0x12345678, 0x7fffffff, 0x80000000, 4294967295]
+    i16_values = [0, 1, 2, 5, 1000, 32767, -1, -2, -1000, -32768]
+    u16_values = [0, 1, 2, 5, 1000, 32767, 40000, 65535]
+    i8_values = [0, 1, 2, 5, 31, 100, 127, -1, -2, -31, -100, -128]
+    u8_values = [0, 1, 2, 5, 31, 100, 127, 200, 255]
 
     def binary_oracle(name, ops, ty, result_ty, literal, values):
         for index, (op, model) in enumerate(ops.items()):
@@ -330,28 +337,7 @@ def main():
                       'fn main() {' + ''.join(body) + 'return 0; }')
             cases.append((f'{name}_{index}', source, ('\n'.join(expected) + '\n').encode(), 0))
 
-    binary_oracle('int32_arith', {
-        '+': lambda a, b: i32(a + b), '-': lambda a, b: i32(a - b),
-        '*': lambda a, b: i32(a * b), '&': lambda a, b: i32(a & b),
-        '|': lambda a, b: i32(a | b), '^': lambda a, b: i32(a ^ b),
-    }, 'i32', 'i32', i32lit, i32_values)
-    binary_oracle('int32_cmp', {
-        '==': lambda a, b: int(a == b), '!=': lambda a, b: int(a != b),
-        '<': lambda a, b: int(a < b), '>': lambda a, b: int(a > b),
-        '<=': lambda a, b: int(a <= b), '>=': lambda a, b: int(a >= b),
-    }, 'i32', 'bool', i32lit, i32_values)
-    binary_oracle('u32_arith', {
-        '+': lambda a, b: u32(a + b), '-': lambda a, b: u32(a - b),
-        '*': lambda a, b: u32(a * b), '&': lambda a, b: a & b,
-        '|': lambda a, b: a | b, '^': lambda a, b: a ^ b,
-    }, 'u32', 'u32', u32lit, u32_values)
-    binary_oracle('u32_cmp', {
-        '==': lambda a, b: int(a == b), '!=': lambda a, b: int(a != b),
-        '<': lambda a, b: int(a < b), '>': lambda a, b: int(a > b),
-    }, 'u32', 'bool', u32lit, u32_values)
-
-    def shift_oracle(name, ty, literal, values, models):
-        counts = [0, 1, 5, 31, 32, 33, 63, 0xffffffff]
+    def shift_oracle(name, ty, literal, values, models, counts):
         for index, (op, model) in enumerate(models.items()):
             body, expected = [], []
             for a in values:
@@ -363,22 +349,11 @@ def main():
                       'fn main() {' + ''.join(body) + 'return 0; }')
             cases.append((f'{name}_{index}', source, ('\n'.join(expected) + '\n').encode(), 0))
 
-    shift_oracle('int32_shift', 'i32', i32lit, i32_values, {
-        '<<': lambda a, k: i32(a << (k & 31)),
-        '>>': lambda a, k: a >> (k & 31),
-        '>>>': lambda a, k: i32((a & mask32) >> (k & 31)),
-    })
-    shift_oracle('u32_shift', 'u32', u32lit, u32_values, {
-        '<<': lambda a, k: u32(a << (k & 31)),
-        '>>': lambda a, k: a >> (k & 31),
-        '>>>': lambda a, k: a >> (k & 31),
-    })
-
-    def division_oracle(name, ty, literal, values, quotient, remainder):
+    def division_oracle(name, ty, literal, values, quotient, remainder, minimum):
         body, expected = [], []
         for a in values:
             for b in values:
-                if b == 0 or (ty == 'i32' and a == -(1 << 31) and b == -1):
+                if b == 0 or (minimum is not None and a == minimum and b == -1):
                     continue
                 la, lb = literal(a), literal(b)
                 body.extend([f'printi(q({la},{lb}));', f'printi({ty}({la}) / {lb});',
@@ -389,10 +364,6 @@ def main():
                   f'fn r(a: {ty}, b: {ty}) -> {ty} {{ return a % b; }} '
                   'fn main() {' + ''.join(body) + 'return 0; }')
         cases.append((name, source, ('\n'.join(expected) + '\n').encode(), 0))
-
-    division_oracle('int32_division', 'i32', i32lit, i32_values, tdiv, tmod)
-    division_oracle('u32_division', 'u32', u32lit, u32_values,
-                    lambda a, b: a // b, lambda a, b: a % b)
 
     def unary_oracle(name, ty, literal, values, model):
         body, expected = [], []
@@ -405,12 +376,60 @@ def main():
                   'fn main() {' + ''.join(body) + 'return 0; }')
         cases.append((name, source, ('\n'.join(expected) + '\n').encode(), 0))
 
-    unary_oracle('int32_unary', 'i32', i32lit, i32_values,
-                 (lambda a: i32(-a), lambda a: i32(~a)))
-    unary_oracle('u32_unary', 'u32', u32lit, u32_values,
-                 (lambda a: u32(-a), lambda a: u32(~a)))
+    for width, sname, uname, svalues, uvalues, minimum in [
+        (32, 'i32', 'u32', i32_values, u32_values, -(1 << 31)),
+        (16, 'i16', 'u16', i16_values, u16_values, -(1 << 15)),
+        (8, 'i8', 'u8', i8_values, u8_values, -(1 << 7)),
+    ]:
+        signed, unsigned = make_signed(width), make_unsigned(width)
+        slit = lambda n, s=signed: f'(-{-s(n)})' if s(n) < 0 else str(s(n))
+        ulit = lambda n, u=unsigned: str(u(n))
+        counts = [0, 1, 5, width - 1, width, width + 1, 63, 0xffffffff]
+        binary_oracle(f'int{width}_arith', {
+            '+': lambda a, b, s=signed: s(a + b), '-': lambda a, b, s=signed: s(a - b),
+            '*': lambda a, b, s=signed: s(a * b), '&': lambda a, b, s=signed: s(a & b),
+            '|': lambda a, b, s=signed: s(a | b), '^': lambda a, b, s=signed: s(a ^ b),
+        }, sname, sname, slit, svalues)
+        binary_oracle(f'int{width}_cmp', {
+            '==': lambda a, b: int(a == b), '!=': lambda a, b: int(a != b),
+            '<': lambda a, b: int(a < b), '>': lambda a, b: int(a > b),
+            '<=': lambda a, b: int(a <= b), '>=': lambda a, b: int(a >= b),
+        }, sname, 'bool', slit, svalues)
+        binary_oracle(f'uint{width}_arith', {
+            '+': lambda a, b, u=unsigned: u(a + b), '-': lambda a, b, u=unsigned: u(a - b),
+            '*': lambda a, b, u=unsigned: u(a * b), '&': lambda a, b: a & b,
+            '|': lambda a, b: a | b, '^': lambda a, b: a ^ b,
+        }, uname, uname, ulit, uvalues)
+        binary_oracle(f'uint{width}_cmp', {
+            '==': lambda a, b: int(a == b), '!=': lambda a, b: int(a != b),
+            '<': lambda a, b: int(a < b), '>': lambda a, b: int(a > b),
+        }, uname, 'bool', ulit, uvalues)
+        shift_oracle(f'int{width}_shift', sname, slit, svalues, {
+            '<<': lambda a, k, s=signed, m=width - 1: s(a << (k & m)),
+            '>>': lambda a, k, m=width - 1: a >> (k & m),
+            '>>>': lambda a, k, s=signed, u=unsigned, m=width - 1: s(u(a) >> (k & m)),
+        }, counts)
+        shift_oracle(f'uint{width}_shift', uname, ulit, uvalues, {
+            '<<': lambda a, k, u=unsigned, m=width - 1: u(a << (k & m)),
+            '>>': lambda a, k, m=width - 1: a >> (k & m),
+            '>>>': lambda a, k, m=width - 1: a >> (k & m),
+        }, counts)
+        division_oracle(f'int{width}_division', sname, slit, svalues, tdiv, tmod, minimum)
+        division_oracle(f'uint{width}_division', uname, ulit, uvalues,
+                        lambda a, b: a // b, lambda a, b: a % b, None)
+        unary_oracle(f'int{width}_unary', sname, slit, svalues,
+                     (lambda a, s=signed: s(-a), lambda a, s=signed: s(~a)))
+        unary_oracle(f'uint{width}_unary', uname, ulit, uvalues,
+                     (lambda a, u=unsigned: u(-a), lambda a, u=unsigned: u(~a)))
     cases.extend([
         ('int32_hex_patterns', 'fn main() { let h: i32 = 0x80000000; let f: i32 = 0xffffffff; let t: i32 = 0x7fffffff; printi(h); printi(f); printi(t); printi(f + 1); printi(h >> 31); }', b'-2147483648\n-1\n2147483647\n0\n-1\n', 0),
+        ('int8_hex_patterns', 'fn main() { let h: i8 = 0x80; let f: i8 = 0xff; let t: i8 = 0x7f; printi(h); printi(f); printi(t); printi(f + 1); printi(h >> 7); }', b'-128\n-1\n127\n0\n-1\n', 0),
+        ('int16_hex_patterns', 'fn main() { let h: i16 = 0x8000; let f: i16 = 0xffff; printi(h); printi(f); printi(f + 1); }', b'-32768\n-1\n0\n', 0),
+        ('uint8_print', 'fn main() { let a: u8 = 255; let b: u8 = 0; printi(a); printi(b); printi(u8(-1)); printi(a - 1); }', b'255\n0\n255\n254\n', 0),
+        ('int8_div_overflow', 'fn main() { let m: i8 = -128; printi(m / -1); }', b'', 71),
+        ('int8_mod_overflow', 'fn main() { let m: i8 = -128; printi(m % -1); }', b'0\n', 0),
+        ('int16_div_overflow', 'fn main() { let m: i16 = -32768; printi(m / -1); }', b'', 71),
+        ('int8_aggregates', 'struct P { a:i8, b:u8 } fn mix(p:P, xs:[i8;2]) -> i16 { return i16(p.a) + i16(p.b) + i16(xs[0]) + i16(xs[1]); } fn main() { let p = P { a:-100, b:200 }; let xs: [i8;2] = [100, -50]; printi(mix(p, xs)); p.a = 127; printi(p.a); printi(xs[0]); }', b'150\n127\n100\n', 0),
         ('u32_print', 'fn main() { let a: u32 = 4294967295; let b: u32 = 0; printi(a); printi(b); printi(u32(-1)); printi(a - 1); }', b'4294967295\n0\n4294967295\n4294967294\n', 0),
         ('int32_div_zero', 'fn main() { let x: i32 = 5; printi(x / 0); }', b'', 70),
         ('int32_mod_zero', 'fn main() { let x: i32 = 5; printi(x % 0); }', b'', 70),
@@ -425,6 +444,10 @@ def main():
     errors.extend([
         ('int32_literal_range', 'fn main() { let x: i32 = 2147483648; }', b'does not fit in i32'),
         ('u32_literal_range', 'fn main() { let x: u32 = 4294967296; }', b'does not fit in u32'),
+        ('int8_literal_range', 'fn main() { let x: i8 = 128; }', b'does not fit in i8'),
+        ('u8_literal_range', 'fn main() { let x: u8 = 256; }', b'does not fit in u8'),
+        ('int16_literal_range', 'fn main() { let x: i16 = 32768; }', b'does not fit in i16'),
+        ('u16_literal_range', 'fn main() { let x: u16 = 65536; }', b'does not fit in u16'),
         ('narrow_no_implicit', 'fn main() { let x: i32 = 0; let y: u32 = x; }', b'type mismatch'),
         ('narrow_param_range', 'fn f(x: i32) {} fn main() { f(5000000000); }', b'does not fit in i32'),
     ])

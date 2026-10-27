@@ -316,9 +316,17 @@ impl Checker<'_> {
                     Some(text) if text.starts_with("0x") || text.starts_with("0X") || text.starts_with("0b") || text.starts_with("0B")
                 );
                 let max = match ty {
+                    Type::I8 if negated => 1u64 << 7,
+                    Type::I8 if radix_wide => u8::MAX as u64,
+                    Type::I8 => i8::MAX as u64,
+                    Type::I16 if negated => 1u64 << 15,
+                    Type::I16 if radix_wide => u16::MAX as u64,
+                    Type::I16 => i16::MAX as u64,
                     Type::I32 if negated => 1u64 << 31,
                     Type::I32 if radix_wide => u32::MAX as u64,
                     Type::I32 => i32::MAX as u64,
+                    Type::U8 => u8::MAX as u64,
+                    Type::U16 => u16::MAX as u64,
                     Type::U32 => u32::MAX as u64,
                     _ => u64::MAX,
                 };

@@ -240,14 +240,34 @@ impl Generator<'_> {
         self.bytes(&[0x48, opcode, 0x85]);
         self.dword((-(8 * (slot as i32 + 1))) as u32);
     }
-    // Narrow results re-enter canonical form: i32 sign-extended, u32
-    // zero-extended. Redundant on already-canonical values.
+    // Narrow results re-enter canonical form: signed widths sign-extended,
+    // unsigned zero-extended. Redundant on already-canonical values.
     fn canonical(&mut self, ty: &Type) {
         match ty {
             Type::I32 => self.bytes(&[0x48, 0x63, 0xc0]), // movsxd rax, eax
             Type::U32 => self.bytes(&[0x89, 0xc0]),       // mov eax, eax
+            Type::I16 => self.bytes(&[0x48, 0x0f, 0xbf, 0xc0]), // movsx rax, ax
+            Type::U16 => self.bytes(&[0x48, 0x0f, 0xb7, 0xc0]), // movzx rax, ax
+            Type::I8 => self.bytes(&[0x48, 0x0f, 0xbe, 0xc0]), // movsx rax, al
+            Type::U8 => self.bytes(&[0x48, 0x0f, 0xb6, 0xc0]), // movzx rax, al
             _ => {}
         }
+    }
+    // Narrow shifts operate within the width and the count is taken modulo
+    // that width, so CL is masked for 8/16-bit operands (hardware masks to 31).
+    fn narrow_shift(&mut self, ty: &Type, op: u8) {
+        match ty.bits() {
+            8 => {
+                self.bytes(&[0x80, 0xe1, 0x07]); // and cl, 7
+                self.bytes(&[0xd2, op]); // shift al, cl
+            }
+            16 => {
+                self.bytes(&[0x80, 0xe1, 0x0f]); // and cl, 15
+                self.bytes(&[0x66, 0xd3, op]); // shift ax, cl
+            }
+            _ => self.bytes(&[0xd3, op]), // shift eax, cl
+        }
+        self.canonical(ty);
     }
     fn block(&mut self, body: &[Stmt]) -> Result<(), Diagnostic> {
         let scope = self.vars.len();
@@ -589,6 +609,10 @@ impl Generator<'_> {
                     // canonical form of the target type.
                     Type::I32 => self.bytes(&[0x48, 0x63, 0xc0]),
                     Type::U32 => self.bytes(&[0x89, 0xc0]),
+                    Type::I16 => self.bytes(&[0x48, 0x0f, 0xbf, 0xc0]),
+                    Type::U16 => self.bytes(&[0x48, 0x0f, 0xb7, 0xc0]),
+                    Type::I8 => self.bytes(&[0x48, 0x0f, 0xbe, 0xc0]),
+                    Type::U8 => self.bytes(&[0x48, 0x0f, 0xb6, 0xc0]),
                     _ => {}
                 }
             }
@@ -743,16 +767,17 @@ impl Generator<'_> {
                     "^" => self.bytes(&[0x48, 0x31, 0xc8]),
                     "<<" => {
                         if expr.ty.narrow() {
-                            self.bytes(&[0xd3, 0xe0]);
-                            self.canonical(&expr.ty);
+                            self.narrow_shift(&expr.ty, 0xe0);
                         } else {
                             self.bytes(&[0x48, 0xd3, 0xe0]);
                         }
                     }
                     ">>" => {
                         if expr.ty.narrow() {
-                            self.bytes(&[0xd3, if left.ty.unsigned() { 0xe8 } else { 0xf8 }]);
-                            self.canonical(&expr.ty);
+                            self.narrow_shift(
+                                &expr.ty,
+                                if left.ty.unsigned() { 0xe8 } else { 0xf8 },
+                            );
                         } else {
                             self.bytes(&[
                                 0x48,
@@ -763,8 +788,7 @@ impl Generator<'_> {
                     }
                     ">>>" => {
                         if expr.ty.narrow() {
-                            self.bytes(&[0xd3, 0xe8]);
-                            self.canonical(&expr.ty);
+                            self.narrow_shift(&expr.ty, 0xe8);
                         } else {
                             self.bytes(&[0x48, 0xd3, 0xe8]);
                         }
@@ -783,15 +807,21 @@ impl Generator<'_> {
                             }
                             return Ok(());
                         }
-                        if left.ty == Type::I32 {
-                            // Canonical operands cannot fault; only the
-                            // quotient may leave the i32 range (MIN / -1).
+                        if left.ty.narrow() {
+                            // Canonical signed operands cannot fault; only the
+                            // quotient may leave the type range (MIN / -1).
                             self.bytes(&[0x48, 0x99, 0x48, 0xf7, 0xf9]);
                             if *op == "%" {
+                                // The remainder always fits the width and is
+                                // already sign-extended by idiv.
                                 self.bytes(&[0x48, 0x89, 0xd0]);
                                 return Ok(());
                             }
-                            self.bytes(&[0x48, 0x63, 0xd0]); // movsxd rdx, eax
+                            match left.ty {
+                                Type::I32 => self.bytes(&[0x48, 0x63, 0xd0]), // movsxd rdx, eax
+                                Type::I16 => self.bytes(&[0x48, 0x0f, 0xbf, 0xd0]), // movsx rdx, ax
+                                _ => self.bytes(&[0x48, 0x0f, 0xbe, 0xd0]),   // movsx rdx, al
+                            }
                             self.bytes(&[0x48, 0x39, 0xd0]); // cmp rdx, rax
                             let in_range = self.jump(Some(0x84));
                             self.exit(71);
@@ -941,13 +971,36 @@ fn canonical_value(ty: &Type, value: u64) -> u64 {
     match ty {
         Type::I32 => ((value as u32) as i32) as u64,
         Type::U32 => value & 0xffff_ffff,
+        Type::I16 => ((value as u16) as i16) as u64,
+        Type::U16 => value & 0xffff,
+        Type::I8 => ((value as u8) as i8) as u64,
+        Type::U8 => value & 0xff,
         _ => value,
     }
 }
 
 fn constant(expr: &Expr) -> Option<u64> {
-    let narrow32 = expr.ty.narrow();
-    let shift_mask = if narrow32 { 31u64 } else { 63 };
+    let narrow = expr.ty.narrow();
+    // Narrow logical shifts move the width value, so the operand is masked to
+    // the width first: a 64-bit shift would leak sign-extension bits downward.
+    let width_mask = if narrow {
+        (1u64 << expr.ty.bits()) - 1
+    } else {
+        u64::MAX
+    };
+    let shift_mask = match expr.ty.bits() {
+        8 => 7u64,
+        16 => 15,
+        32 => 31,
+        _ => 63,
+    };
+    // Reinterpret a canonical value as the signed type of the expression.
+    let signed = |value: u64| match expr.ty {
+        Type::I8 => (value as u8) as i8 as i64,
+        Type::I16 => (value as u16) as i16 as i64,
+        Type::I32 => (value as u32) as i32 as i64,
+        _ => value as i64,
+    };
     match &expr.kind {
         ExprKind::Number(n) => Some(canonical_value(&expr.ty, *n)),
         ExprKind::Bool(value) => Some(u64::from(*value)),
@@ -981,16 +1034,26 @@ fn constant(expr: &Expr) -> Option<u64> {
                 "^" => a ^ b,
                 "<<" => canonical(a.wrapping_shl((b & shift_mask) as u32)),
                 ">>" if left.ty.unsigned() => a.wrapping_shr((b & shift_mask) as u32),
-                ">>" if narrow32 => {
-                    canonical((a as i32).wrapping_shr((b & shift_mask) as u32) as u64)
-                }
+                ">>" if narrow => canonical(signed(a).wrapping_shr((b & shift_mask) as u32) as u64),
                 ">>" => (a as i64).wrapping_shr((b & shift_mask) as u32) as u64,
-                ">>>" if narrow32 => canonical(((a as u32) >> (b & shift_mask)) as u64),
+                // The width value shifts logically, then re-enters canonical form.
+                ">>>" if left.ty.unsigned() => a.wrapping_shr((b & shift_mask) as u32),
+                ">>>" if narrow => canonical((a & width_mask) >> (b & shift_mask)),
                 ">>>" => a.wrapping_shr((b & shift_mask) as u32),
                 "/" if left.ty.unsigned() => a.checked_div(b)?,
                 "%" if left.ty.unsigned() => a.checked_rem(b)?,
-                "/" if narrow32 => canonical((a as i32).checked_div(b as i32)? as u64),
-                "%" if narrow32 => canonical((a as i32).checked_rem(b as i32)? as u64),
+                // Division runs in the exact width so MIN / -1 refuses to fold
+                // and keeps the runtime exit 71.
+                "/" if narrow => canonical(match expr.ty {
+                    Type::I8 => (a as u8 as i8).checked_div(b as u8 as i8)? as i64 as u64,
+                    Type::I16 => (a as u16 as i16).checked_div(b as u16 as i16)? as i64 as u64,
+                    _ => (a as u32 as i32).checked_div(b as u32 as i32)? as i64 as u64,
+                }),
+                "%" if narrow => canonical(match expr.ty {
+                    Type::I8 => (a as u8 as i8).checked_rem(b as u8 as i8)? as i64 as u64,
+                    Type::I16 => (a as u16 as i16).checked_rem(b as u16 as i16)? as i64 as u64,
+                    _ => (a as u32 as i32).checked_rem(b as u32 as i32)? as i64 as u64,
+                }),
                 "/" => (a as i64).checked_div(b as i64)? as u64,
                 "%" => (a as i64).checked_rem(b as i64)? as u64,
                 "==" => u64::from(a == b),
