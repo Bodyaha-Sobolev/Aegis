@@ -208,6 +208,17 @@ def main():
             result = run(exe)
             assert (result.stdout, result.returncode) == (expected, code), (name, result.stdout, result.stderr, result.returncode)
             print('PASS', name)
+        inspected = folder/'strings_example.exe'
+        before = inspected.read_bytes()
+        report = run(COMPILER, 'inspect', inspected)
+        assert report.returncode == 0 and all(s in report.stdout for s in [b'PE64 x64',b'.rdata',b'KERNEL32.DLL',b'WriteFile',b'NX-compatible=true']), (report.stdout,report.stderr)
+        assert inspected.read_bytes() == before
+        print('PASS read-only PE inspection')
+        damaged = folder/'invalid-pe.bin'
+        damaged.write_bytes(b'MZ'+b'\xff'*70)
+        report = run(COMPILER,'inspect',damaged)
+        assert report.returncode == 2 and b'PE:' in report.stderr and not report.stdout
+        print('PASS malformed PE rejected')
         for name, source, diagnostic in errors:
             src, exe = folder / (name+'.ae'), folder / (name+'.exe')
             src.write_text(source, encoding='utf-8')
@@ -261,7 +272,7 @@ def main():
             result = run(COMPILER, *args)
             assert result.returncode == 2, (args, result.stdout, result.returncode)
         print('PASS invalid CLI commands and dialects')
-    print(f'{len(cases) + len(errors) + 10} checks passed')
+    print(f'{len(cases) + len(errors) + 12} checks passed')
 
 
 if __name__ == '__main__':

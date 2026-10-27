@@ -5,6 +5,7 @@ pub mod codec;
 mod codegen;
 mod lexer;
 mod parser;
+pub mod pe;
 mod semantics;
 pub mod storage;
 mod strings;

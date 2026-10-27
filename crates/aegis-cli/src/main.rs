@@ -1,4 +1,4 @@
-use aegis_lang::{codec, compile, storage};
+use aegis_lang::{codec, compile, pe, storage};
 use std::{
     ffi::OsString,
     io::Write,
@@ -13,7 +13,7 @@ fn main() {
     }
 }
 fn usage() -> String {
-    "AEGIS 0.2\n  aegis-cli build <source.ae|source.aeg> [out.exe] [-k keyfile -c dialect]\n  aegis-cli check <source.ae>\n  aegis-cli enc <source.ae> <out.aeg> -k keyfile -c dialect\n  aegis-cli dec <source.aeg> <out.ae> -k keyfile -c dialect\n  aegis-cli keygen <new-key-file>\n  dialect: decimal or 0x000..0xFFF".into()
+    concat!("AEGIS ", env!("CARGO_PKG_VERSION"), "\n  aegis-cli build <source.ae|source.aeg> [out.exe] [-k keyfile -c dialect]\n  aegis-cli check <source.ae>\n  aegis-cli inspect <file.exe|file.dll|file.sys>\n  aegis-cli enc <source.ae> <out.aeg> -k keyfile -c dialect\n  aegis-cli dec <source.aeg> <out.ae> -k keyfile -c dialect\n  aegis-cli keygen <new-key-file>\n  dialect: decimal or 0x000..0xFFF").into()
 }
 fn execute(args: Vec<OsString>) -> Result<(), String> {
     if args.is_empty() || args[0] == "--help" || args[0] == "help" {
@@ -50,6 +50,15 @@ fn execute(args: Vec<OsString>) -> Result<(), String> {
             _ => paths.push(PathBuf::from(&args[i])),
         }
         i += 1;
+    }
+    if command == "inspect" {
+        if paths.len() != 1 || key_path.is_some() || dialect.is_some() {
+            return Err(usage());
+        }
+        let bytes = storage::read_bounded(&paths[0], pe::MAX_FILE).map_err(|e| e.to_string())?;
+        let image = pe::inspect(&bytes).map_err(|e| e.to_string())?;
+        print!("{image}");
+        return Ok(());
     }
     if command == "keygen" {
         if paths.len() != 1 || key_path.is_some() || dialect.is_some() {

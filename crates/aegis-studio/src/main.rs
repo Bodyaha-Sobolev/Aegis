@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 mod document;
 mod highlighting;
+mod inspector;
 mod navigation;
 mod runner;
 
@@ -43,6 +44,7 @@ enum Event {
     Opened(PathBuf, Result<String, String>),
     Output(u64, Vec<u8>),
     Finished(u64, Result<(i32, Duration), String>),
+    Inspected(PathBuf, Result<aegis_lang::pe::Image, String>),
 }
 enum ProtectedAction {
     Open(PathBuf, Zeroizing<Vec<u8>>),
@@ -91,6 +93,8 @@ struct Studio {
     navigation_selected: usize,
     smoke_frames: Option<u32>,
     screenshot: Option<PathBuf>,
+    inspector: Option<inspector::Inspector>,
+    inspecting: bool,
 }
 impl Default for Studio {
     fn default() -> Self {
@@ -126,6 +130,8 @@ impl Default for Studio {
             navigation_selected: 0,
             smoke_frames: None,
             screenshot: None,
+            inspector: None,
+            inspecting: false,
         }
     }
 }
@@ -148,11 +154,18 @@ impl Studio {
         });
         let mut app = Self::default();
         let args: Vec<_> = std::env::args_os().skip(1).collect();
-        if args.first().is_some_and(|s| s == "--smoke-test") {
+        if args
+            .first()
+            .is_some_and(|s| s == "--smoke-test" || s == "--smoke-inspect")
+        {
             app.smoke_frames = Some(0);
             app.screenshot = args.get(1).map(PathBuf::from);
             if let Some(path) = args.get(2) {
-                app.open_path(PathBuf::from(path));
+                if args[0] == "--smoke-inspect" {
+                    app.inspect_binary(PathBuf::from(path), cc.egui_ctx.clone());
+                } else {
+                    app.open_path(PathBuf::from(path));
+                }
             }
         } else if let Some(path) = args.first() {
             app.open_path(PathBuf::from(path));
@@ -165,6 +178,21 @@ impl Studio {
             .len()
             .min(OUTPUT_LIMIT.saturating_sub(self.output.len()));
         self.output.extend_from_slice(&bytes[..n]);
+    }
+    fn inspect_binary(&mut self, path: PathBuf, ctx: egui::Context) {
+        if self.inspecting {
+            return;
+        }
+        self.inspecting = true;
+        self.status = "Inspecting binary…".into();
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = storage::read_bounded(&path, aegis_lang::pe::MAX_FILE)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| aegis_lang::pe::inspect(&bytes).map_err(|e| e.to_string()));
+            let _ = sender.send(Event::Inspected(path, result));
+            ctx.request_repaint();
+        });
     }
     fn fail(&mut self, error: impl AsRef<str>) {
         self.status = "Operation failed".into();
@@ -363,6 +391,16 @@ impl Studio {
     fn receive(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
+                Event::Inspected(path, result) => {
+                    self.inspecting = false;
+                    match result {
+                        Ok(image) => {
+                            self.inspector = Some(inspector::Inspector::new(path, image));
+                            self.status = "Binary inspected · file not executed".into();
+                        }
+                        Err(error) => self.fail(error),
+                    }
+                }
                 Event::Analyzed(id, revision, result) => {
                     self.analyzing = false;
                     if let Some(doc) = self
@@ -653,6 +691,21 @@ impl Studio {
                         self.save(id, false, false);
                     }
                     ui.menu_button("File", |ui| {
+                        if ui
+                            .add_enabled(
+                                !self.inspecting,
+                                egui::Button::new("Inspect EXE / DLL / SYS…"),
+                            )
+                            .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Windows binary", &["exe", "dll", "sys"])
+                                .pick_file()
+                            {
+                                self.inspect_binary(path, ctx.clone());
+                            }
+                            ui.close();
+                        }
                         if ui.button("Save as…   Ctrl+Shift+S").clicked() {
                             if let Some(id) = id {
                                 self.save(id, true, false);
@@ -794,8 +847,14 @@ impl Studio {
             });
         self.close_modal(ctx);
         self.unlock_modal(ctx);
+        if let Some(inspector) = &mut self.inspector
+            && !inspector.show(ctx)
+        {
+            self.inspector = None;
+        }
         self.navigation_modal(ctx);
         if self.busy
+            || self.inspecting
             || self.analyzing
             || self.run.is_some()
             || self.docs.iter().any(|d| d.analyze_after.is_some())
@@ -833,7 +892,7 @@ impl Studio {
                 }
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT),|ui| {
-                ui.label(RichText::new("AEGIS 0.2\nNative compiler + editor\n\nCtrl+P  Find file\nCtrl+G  Go to line\nCtrl+F  Find\nCtrl+S  Save\nF6  Build\nF5  Build and run").small().color(MUTED));
+                ui.label(RichText::new(concat!("AEGIS ", env!("CARGO_PKG_VERSION"), "\nNative compiler + editor\n\nCtrl+P  Find file\nCtrl+G  Go to line\nCtrl+F  Find\nCtrl+S  Save\nF6  Build\nF5  Build and run")).small().color(MUTED));
             });
         });
     }
