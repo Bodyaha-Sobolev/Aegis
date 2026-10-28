@@ -67,6 +67,7 @@ fn returns(body: &[Stmt]) -> bool {
         StmtKind::Return(_) => true,
         StmtKind::Block(body) | StmtKind::Unsafe(body) => returns(body),
         StmtKind::If(_, yes, no) => returns(yes) && returns(no),
+        StmtKind::Match(_, arms) => !arms.is_empty() && arms.iter().all(|arm| returns(&arm.body)),
         _ => false,
     })
 }
@@ -131,7 +132,7 @@ impl Checker<'_> {
                     self.aggregate_value(value, Some(self.result.clone()))?;
                 }
                 StmtKind::Expr(value) => {
-                    self.expr(value, None)?;
+                    self.aggregate_value(value, None)?;
                 }
                 StmtKind::Builtin(kind, value) => {
                     if matches!(kind, Keyword::Print | Keyword::Println) {
@@ -149,6 +150,67 @@ impl Checker<'_> {
                     self.numeric(condition, None)?;
                     self.block(yes)?;
                     self.block(no)?;
+                }
+                StmtKind::Match(value, arms) => {
+                    let ty = self.aggregate_value(value, None)?;
+                    let Type::Enum(enumeration) = &ty else {
+                        return Err(self.error(&value.span, "match requires an enum value"));
+                    };
+                    let scope = self.vars.len();
+                    if self.vars.iter().map(|(_, t)| t.slots()).sum::<usize>() + ty.slots() > 256 {
+                        return Err(self
+                            .error(&stmt.span, "match temporary exceeds local slot limit (256)"));
+                    }
+                    self.vars
+                        .push((format!("@match{}", stmt.span.start), ty.clone()));
+                    let mut seen = std::collections::HashSet::new();
+                    for arm in arms.iter_mut() {
+                        if arm.enumeration != *enumeration {
+                            return Err(
+                                self.error(&arm.span, "match variant belongs to a different enum")
+                            );
+                        }
+                        if !seen.insert(arm.variant) {
+                            return Err(self.error(&arm.span, "duplicate match variant"));
+                        }
+                        let payload = &enumeration.variants[arm.variant].1;
+                        match (payload, &arm.binding) {
+                            (Some(payload), Some(name)) if name != "_" => {
+                                if self.vars.iter().any(|(n, _)| n == name) {
+                                    return Err(self.error(
+                                        &arm.span,
+                                        format!("variable already defined: {name}"),
+                                    ));
+                                }
+                                if self.vars.iter().map(|(_, t)| t.slots()).sum::<usize>()
+                                    + payload.slots()
+                                    > 256
+                                {
+                                    return Err(self.error(
+                                        &arm.span,
+                                        "match binding exceeds local slot limit (256)",
+                                    ));
+                                }
+                                self.vars.push((name.clone(), payload.clone()));
+                            }
+                            (Some(_), Some(_)) | (None, None) => {}
+                            _ => {
+                                return Err(self.error(
+                                    &arm.span,
+                                    "match pattern must bind its variant payload or use (_)",
+                                ));
+                            }
+                        }
+                        self.block(&mut arm.body)?;
+                        self.vars.truncate(scope + 1);
+                    }
+                    self.vars.truncate(scope);
+                    if seen.len() != enumeration.variants.len() {
+                        return Err(self.error(
+                            &stmt.span,
+                            "non-exhaustive match: every enum variant is required",
+                        ));
+                    }
                 }
                 StmtKind::While(condition, body) => {
                     self.numeric(condition, None)?;
@@ -179,6 +241,31 @@ impl Checker<'_> {
         expr: &mut Expr,
         expected: Option<Type>,
     ) -> Result<Type, Diagnostic> {
+        if let ExprKind::Variant(enumeration, index, payload) = &mut expr.kind {
+            let ty = Type::Enum(enumeration.clone());
+            if let Some(expected) = expected.as_ref()
+                && *expected != ty
+            {
+                return Err(self.error(
+                    &expr.span,
+                    format!("type mismatch: expected {expected}, found {ty}"),
+                ));
+            }
+            match (&enumeration.variants[*index].1, payload) {
+                (Some(expected), Some(value)) => {
+                    self.aggregate_value(value, Some(expected.clone()))?;
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(self.error(
+                        &expr.span,
+                        "enum constructor payload does not match its variant",
+                    ));
+                }
+            }
+            expr.ty = ty.clone();
+            return Ok(ty);
+        }
         if let ExprKind::Record(record, fields) = &mut expr.kind {
             let ty = Type::Record(record.clone());
             if let Some(expected) = expected.as_ref()
@@ -320,6 +407,7 @@ impl Checker<'_> {
                 .hint(value)
                 .and_then(|element| Type::array(element, *count)),
             ExprKind::Record(record, _) => Some(Type::Record(record.clone())),
+            ExprKind::Variant(enumeration, _, _) => Some(Type::Enum(enumeration.clone())),
             ExprKind::Field(base, name) => match self.hint(base) {
                 Some(Type::Record(record)) => record
                     .fields
@@ -396,6 +484,7 @@ impl Checker<'_> {
                 }
                 ty
             }
+            ExprKind::Variant(..) => return self.aggregate_value(expr, expected),
             ExprKind::Array(_) | ExprKind::Repeat(..) | ExprKind::Record(..) => {
                 return Err(self.error(
                     &expr.span,

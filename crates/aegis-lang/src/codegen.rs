@@ -29,6 +29,7 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
     let mut g = Generator {
         source,
         code: Vec::new(),
+        code_overflow: false,
         external_functions: program
             .functions
             .iter()
@@ -152,11 +153,8 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
                     g.dword((element * 8) as u32);
                     g.local(0x89, slot + param.ty.slots() - 1 - element);
                 }
-                for (string, _) in
-                    Generator::str_slot_list(&param.ty.clone(), slot + param.ty.slots() - 1)
-                {
-                    g.local(0x8b, string);
-                    g.emit_retain();
+                for site in Generator::str_slot_list(&param.ty, slot + param.ty.slots() - 1) {
+                    g.owned_action(&site, OwnedMemory::Local, false);
                 }
             }
         }
@@ -176,6 +174,9 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
         }
         g.block(&function.body)?;
         g.release_scope(0);
+        if g.code_overflow {
+            return Err(g.error(&function.span, "native code limit exceeded (64 KiB)"));
+        }
         // Win64 calls require 16-byte stack alignment. Slots from disjoint
         // lexical scopes share space; reserve only the maximum live count.
         let frame_size = (g.peak_slots * 8).next_multiple_of(16) as u32;
@@ -201,6 +202,9 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
     let Some(&(main, _)) = g.functions.get("main") else {
         return Err(g.error(&(0..0), "fn main() is required"));
     };
+    if g.code_overflow {
+        return Err(g.error(&(0..0), "native code limit exceeded (64 KiB)"));
+    }
     g.patch(main_patch, g.offsets[main]);
     for &(patch, index) in &g.calls {
         let target = g.offsets[index];
@@ -221,9 +225,22 @@ struct Loop {
     breaks: Vec<usize>,
     vars: usize,
 }
+#[derive(Clone)]
+struct OwnedSlot {
+    slot: usize,
+    strings: bool,
+    guards: Vec<(usize, u32)>,
+}
+#[derive(Clone, Copy)]
+enum OwnedMemory {
+    Local,
+    Stack(usize),
+    IndirectStack(usize),
+}
 struct Generator<'a> {
     source: &'a str,
     code: Vec<u8>,
+    code_overflow: bool,
     functions: HashMap<String, (usize, usize)>,
     external_functions: HashMap<usize, (usize, crate::ffi::External)>,
     offsets: Vec<usize>,
@@ -282,6 +299,10 @@ impl Generator<'_> {
         Diagnostic::new(self.source, span.clone(), message)
     }
     fn bytes(&mut self, bytes: &[u8]) {
+        if self.code_overflow || bytes.len() > MAX_CODE - self.code.len() {
+            self.code_overflow = true;
+            return;
+        }
         self.code.extend_from_slice(bytes);
     }
     fn dword(&mut self, value: u32) {
@@ -290,7 +311,7 @@ impl Generator<'_> {
     fn hole(&mut self) -> usize {
         let at = self.code.len();
         self.dword(0);
-        at
+        if self.code_overflow { usize::MAX } else { at }
     }
     fn jump(&mut self, condition: Option<u8>) -> usize {
         if let Some(c) = condition {
@@ -301,7 +322,9 @@ impl Generator<'_> {
         self.hole()
     }
     fn patch(&mut self, at: usize, target: usize) {
-        patch_relative(&mut self.code, at, target);
+        if !self.code_overflow {
+            patch_relative(&mut self.code, at, target);
+        }
     }
     fn here(&mut self, at: usize) {
         self.patch(at, self.code.len());
@@ -610,14 +633,33 @@ impl Generator<'_> {
             .map(|(_, s, _)| *s)
             .ok_or_else(|| self.error(span, format!("undefined variable: {name}")))
     }
-    // Offsets (relative to a base) that hold owned values, in
-    // snapshot-address order: field 0 sits at the lowest address. The flag
-    // marks dynamic arrays of str (their release walks the elements).
-    fn str_offsets(ty: &Type, base: usize, out: &mut Vec<(usize, bool)>) {
+    // Logical snapshot offsets. Guards select the active tagged payload.
+    fn str_offsets(ty: &Type, base: usize, out: &mut Vec<OwnedSlot>) {
+        if ty.owned_sites() == 0 {
+            return;
+        }
         if *ty == Type::Str {
-            out.push((base, false));
+            out.push(OwnedSlot {
+                slot: base,
+                strings: false,
+                guards: Vec::new(),
+            });
         } else if let Type::Dyn(element) = ty {
-            out.push((base, **element == Type::Str));
+            out.push(OwnedSlot {
+                slot: base,
+                strings: **element == Type::Str,
+                guards: Vec::new(),
+            });
+        } else if let Type::Enum(enumeration) = ty {
+            for (index, (_, payload)) in enumeration.variants.iter().enumerate() {
+                if let Some(payload) = payload {
+                    let start = out.len();
+                    Self::str_offsets(payload, base + 1, out);
+                    for site in &mut out[start..] {
+                        site.guards.insert(0, (base, index as u32));
+                    }
+                }
+            }
         } else if let Type::Record(record) = ty {
             let mut offset = base;
             for (_, field) in &record.fields {
@@ -625,40 +667,60 @@ impl Generator<'_> {
                 offset += field.slots();
             }
         } else if let Some(element) = ty.element() {
-            let stride = element.slots();
             for index in 0..ty.len().expect("checked array") {
-                Self::str_offsets(&element, base + index * stride, out);
+                Self::str_offsets(&element, base + index * element.slots(), out);
             }
         }
     }
-    // The same walk over rbp-relative slot indices: addresses descend as the
-    // slot index grows, so records store field 0 at the highest slot.
-    fn str_slots(ty: &Type, top: usize, out: &mut Vec<(usize, bool)>) {
-        if *ty == Type::Str {
-            out.push((top, false));
-        } else if let Type::Dyn(element) = ty {
-            let str_elements = **element == Type::Str;
-            out.push((top, str_elements));
-        } else if let Type::Record(record) = ty {
-            let mut cursor = top;
-            for (index, (_, field)) in record.fields.iter().enumerate() {
-                let field_slots = field.slots();
-                Self::str_slots(field, cursor, out);
-                if index + 1 < record.fields.len() {
-                    cursor -= field_slots;
-                }
-            }
-        } else if let Some(element) = ty.element() {
-            let stride = element.slots();
-            for index in 0..ty.len().expect("checked array") {
-                Self::str_slots(&element, top - index * stride, out);
-            }
-        }
-    }
-    fn str_slot_list(ty: &Type, top: usize) -> Vec<(usize, bool)> {
+    fn str_slot_list(ty: &Type, top: usize) -> Vec<OwnedSlot> {
         let mut slots = Vec::new();
-        Self::str_slots(ty, top, &mut slots);
+        Self::str_offsets(ty, 0, &mut slots);
+        for site in &mut slots {
+            site.slot = top - site.slot;
+            for (tag, _) in &mut site.guards {
+                *tag = top - *tag;
+            }
+        }
         slots
+    }
+    fn owned_load(&mut self, memory: OwnedMemory, slot: usize) {
+        match memory {
+            OwnedMemory::Local => self.local(0x8b, slot),
+            OwnedMemory::Stack(base) => {
+                self.bytes(&[0x48, 0x8b, 0x84, 0x24]);
+                self.dword((base + slot * 8) as u32);
+            }
+            OwnedMemory::IndirectStack(_) => {
+                self.bytes(&[0x49, 0x8b, 0x82]);
+                self.dword((slot * 8) as u32);
+            }
+        }
+    }
+    fn owned_action(&mut self, site: &OwnedSlot, memory: OwnedMemory, release: bool) {
+        if self.code_overflow {
+            return;
+        }
+        if let OwnedMemory::IndirectStack(offset) = memory {
+            self.bytes(&[0x4c, 0x8b, 0x94, 0x24]);
+            self.dword(offset as u32);
+        }
+        let mut skips = Vec::new();
+        for (tag, variant) in &site.guards {
+            self.owned_load(memory, *tag);
+            self.bytes(&[0x48, 0x3d]);
+            self.dword(*variant);
+            skips.push(self.jump(Some(0x85)));
+        }
+        self.owned_load(memory, site.slot);
+        if release {
+            self.bytes(&[0x48, 0x89, 0xc1]);
+            self.emit_release(site.strings);
+        } else {
+            self.emit_retain();
+        }
+        for skip in skips {
+            self.here(skip);
+        }
     }
     // rcx already holds the value.
     fn emit_retain(&mut self) {
@@ -704,8 +766,8 @@ impl Generator<'_> {
         for (_, slot, ty) in &self.vars[from..] {
             slots.extend(Self::str_slot_list(ty, slot + ty.slots() - 1));
         }
-        for (slot, str_elements) in slots {
-            self.release_slot(slot, str_elements);
+        for site in slots {
+            self.owned_action(&site, OwnedMemory::Local, true);
         }
     }
     // Evaluate a string expression as an owned temporary: places are
@@ -756,6 +818,9 @@ impl Generator<'_> {
     fn data_ref(&mut self, opcode: &[u8], offset: usize) {
         self.bytes(opcode);
         let at = self.hole();
+        if self.code_overflow {
+            return;
+        }
         // at is the position of the rel32 itself; rip after it is TEXT+at+4.
         let disp = RDATA + offset as u32 - (TEXT + at as u32 + 4);
         self.code[at..at + 4].copy_from_slice(&disp.to_le_bytes());
@@ -807,7 +872,7 @@ impl Generator<'_> {
         let slots = self.slots;
         for stmt in body {
             self.statement(stmt)?;
-            if self.code.len() > MAX_CODE {
+            if self.code_overflow {
                 return Err(self.error(&stmt.span, "native code limit exceeded (64 KiB)"));
             }
         }
@@ -833,12 +898,23 @@ impl Generator<'_> {
         end: usize,
         offset: usize,
     ) -> Result<(), Diagnostic> {
+        if self.code_overflow {
+            return Err(self.error(&value.span, "native code limit exceeded (64 KiB)"));
+        }
         if value.ty.dyn_array() {
             self.str_temp(value)?;
             self.snapshot_store(end, offset);
             return Ok(());
         }
         match &value.kind {
+            ExprKind::Variant(_, index, payload) => {
+                self.bytes(&[0xb8]);
+                self.dword(*index as u32);
+                self.snapshot_store(end, offset);
+                if let Some(payload) = payload {
+                    self.write_snapshot(payload, end, offset + 1)?;
+                }
+            }
             ExprKind::Record(record, fields) => {
                 for (name, value) in fields {
                     let field_offset: usize = record
@@ -869,13 +945,9 @@ impl Generator<'_> {
                     }
                     // Each extra copy shares the element's pointers until it
                     // takes its own reference.
-                    for (string, _) in &owned {
-                        self.bytes(&[0x48, 0x8b, 0x8c, 0x24]);
-                        self.dword(
-                            ((self.stack - end + offset + index * value.ty.slots() + string) * 8)
-                                as u32,
-                        ); // mov rcx, [rsp+..]
-                        self.emit_retain_rcx();
+                    for site in &owned {
+                        let base = (self.stack - end + offset + index * value.ty.slots()) * 8;
+                        self.owned_action(site, OwnedMemory::Stack(base), false);
                     }
                 }
             }
@@ -897,10 +969,12 @@ impl Generator<'_> {
                         // take copies, so each owned value gains one here.
                         let mut owned = Vec::new();
                         Self::str_offsets(&value.ty.clone(), offset, &mut owned);
-                        for (offset, _) in owned {
-                            self.bytes(&[0x48, 0x8b, 0x8c, 0x24]);
-                            self.dword(((self.stack - end + offset) * 8) as u32); // mov rcx, [rsp+..]
-                            self.emit_retain_rcx();
+                        for site in owned {
+                            self.owned_action(
+                                &site,
+                                OwnedMemory::Stack((self.stack - end) * 8),
+                                false,
+                            );
                         }
                     }
                 } else if value.ty.single() {
@@ -934,10 +1008,8 @@ impl Generator<'_> {
     ) -> Result<(), Diagnostic> {
         self.snapshot(value)?;
         if assign {
-            for (offset, str_elements) in
-                Self::str_slot_list(&value.ty.clone(), slot + value.ty.slots() - 1)
-            {
-                self.release_slot(offset, str_elements);
+            for site in Self::str_slot_list(&value.ty, slot + value.ty.slots() - 1) {
+                self.owned_action(&site, OwnedMemory::Local, true);
             }
         }
         for index in 0..value.ty.slots() {
@@ -1167,12 +1239,8 @@ impl Generator<'_> {
                     let slots = value.ty.slots();
                     let mut old = Vec::new();
                     Self::str_offsets(&value.ty.clone(), 0, &mut old);
-                    for (string, str_elements) in &old {
-                        self.bytes(&[0x48, 0x8b, 0x8c, 0x24]);
-                        self.dword((slots * 8) as u32); // mov rcx, [rsp+slots*8]
-                        self.bytes(&[0x49, 0x8b, 0x8c, 0x22]);
-                        self.dword((string * 8) as u32); // mov rcx, [rcx+string*8]
-                        self.emit_release(*str_elements);
+                    for site in &old {
+                        self.owned_action(site, OwnedMemory::IndirectStack(slots * 8), true);
                     }
                     self.bytes(&[0x48, 0x8b, 0x8c, 0x24]);
                     self.dword((slots * 8) as u32);
@@ -1207,6 +1275,16 @@ impl Generator<'_> {
             }
             StmtKind::Expr(expr) => {
                 let initial_stack = self.stack;
+                if expr.ty.aggregate() {
+                    self.snapshot(expr)?;
+                    let mut owned = Vec::new();
+                    Self::str_offsets(&expr.ty, 0, &mut owned);
+                    for site in &owned {
+                        self.owned_action(site, OwnedMemory::Stack(0), true);
+                    }
+                    self.restore_stack(initial_stack);
+                    return Ok(());
+                }
                 self.expr(expr)?;
                 if expr.ty.owned() && !is_place(expr) {
                     self.bytes(&[0x48, 0x89, 0xc1]);
@@ -1313,6 +1391,55 @@ impl Generator<'_> {
                 self.block(no)?;
                 self.here(end);
             }
+            StmtKind::Match(value, arms) => {
+                let scope = self.vars.len();
+                let slots = self.slots;
+                let slot = self.declare(
+                    &format!("@match{}", stmt.span.start),
+                    value.ty.clone(),
+                    &stmt.span,
+                )?;
+                self.store_aggregate(slot, value, false)?;
+                let top = slot + value.ty.slots() - 1;
+                let after_temporary = self.slots;
+                let mut done = Vec::new();
+                for arm in arms {
+                    self.local(0x8b, top);
+                    self.bytes(&[0x48, 0x3d]);
+                    self.dword(arm.variant as u32);
+                    let next = self.jump(Some(0x85));
+                    if let Some(name) = &arm.binding
+                        && name != "_"
+                    {
+                        let payload = arm.enumeration.variants[arm.variant]
+                            .1
+                            .as_ref()
+                            .expect("checked payload");
+                        let destination = self.declare(name, payload.clone(), &arm.span)?;
+                        for index in 0..payload.slots() {
+                            self.local(0x8b, top - 1 - index);
+                            self.local(0x89, destination + payload.slots() - 1 - index);
+                        }
+                        for site in Self::str_slot_list(payload, destination + payload.slots() - 1)
+                        {
+                            self.owned_action(&site, OwnedMemory::Local, false);
+                        }
+                    }
+                    self.block(&arm.body)?;
+                    self.release_scope(scope + 1);
+                    self.vars.truncate(scope + 1);
+                    self.slots = after_temporary;
+                    done.push(self.jump(None));
+                    self.here(next);
+                }
+                self.exit(76); // A corrupted tag must not enter an uninitialized arm.
+                for jump in done {
+                    self.here(jump);
+                }
+                self.release_scope(scope);
+                self.vars.truncate(scope);
+                self.slots = slots;
+            }
             StmtKind::While(condition, body) => {
                 let start = self.code.len();
                 self.expr(condition)?;
@@ -1358,6 +1485,9 @@ impl Generator<'_> {
         Ok(())
     }
     fn expr(&mut self, expr: &Expr) -> Result<(), Diagnostic> {
+        if self.code_overflow {
+            return Err(self.error(&expr.span, "native code limit exceeded (64 KiB)"));
+        }
         if let Some(value) = constant(expr) {
             self.bytes(&[0x48, 0xb8]);
             self.bytes(&value.to_le_bytes());
@@ -1427,7 +1557,10 @@ impl Generator<'_> {
                 }
                 self.pop(&[0x58]); // rax = the block
             }
-            ExprKind::Array(_) | ExprKind::Repeat(..) | ExprKind::Record(..) => {
+            ExprKind::Array(_)
+            | ExprKind::Repeat(..)
+            | ExprKind::Record(..)
+            | ExprKind::Variant(..) => {
                 return Err(self.error(&expr.span, "aggregate literal requires local storage"));
             }
             ExprKind::Field(..) => {
@@ -1756,12 +1889,8 @@ impl Generator<'_> {
                         let base = amount + (self.stack - location) * 8;
                         let mut owned = Vec::new();
                         Self::str_offsets(&args[arg].ty.clone(), 0, &mut owned);
-                        for (string, str_elements) in owned {
-                            self.bytes(&[0x4c, 0x8b, 0x94, 0x24]);
-                            self.dword(base as u32); // reload after each release
-                            self.bytes(&[0x49, 0x8b, 0x8c, 0x22]);
-                            self.dword((string * 8) as u32); // mov rcx, [r10+string*8]
-                            self.emit_release(str_elements);
+                        for site in owned {
+                            self.owned_action(&site, OwnedMemory::IndirectStack(base), true);
                         }
                     }
                     if expr.ty.float() {

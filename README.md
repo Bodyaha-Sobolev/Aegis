@@ -5,6 +5,10 @@
 Основной результат компиляции — самостоятельный Windows x64 EXE.
 Обязательной ВМ и браузерной оболочки нет.
 
+В исходниках после релиза 0.2.21 добавлены `enum` и исчерпывающий `match`:
+см. [пример](examples/results.ae). Опубликованные EXE 0.2.21 этих конструкций
+ещё не содержат; для них нужна сборка текущих исходников.
+
 Исходники и обновления: [Bodyaha-Sobolev/Aegis](https://github.com/Bodyaha-Sobolev/Aegis).
 Скачать IDE и CLI: [ранние сборки Aegis](https://github.com/Bodyaha-Sobolev/Aegis/releases).
 Windows CI запускает проверки и собирает IDE/CLI; готовые EXE доступны в

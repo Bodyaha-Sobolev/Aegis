@@ -7,6 +7,8 @@ pub(crate) enum Keyword {
     Unsafe,
     Extern,
     Struct,
+    Enum,
+    Match,
     Mod,
     Use,
     As,
@@ -65,6 +67,8 @@ fn keyword(word: &str) -> Option<Keyword> {
         "unsafe" => Keyword::Unsafe,
         "extern" => Keyword::Extern,
         "struct" => Keyword::Struct,
+        "enum" => Keyword::Enum,
+        "match" => Keyword::Match,
         "mod" => Keyword::Mod,
         "use" => Keyword::Use,
         "as" => Keyword::As,
@@ -212,9 +216,9 @@ fn scan(source: &str) -> Vec<Token> {
             }
         } else {
             let symbol = [
-                "[", "]", ">>>", "<<", ">>", "->", "::", ":", "==", "!=", "<=", ">=", "&&", "||",
-                "(", ")", "{", "}", ";", ",", "+", "-", "*", "/", "%", "=", "!", "<", ">", "&",
-                "|", "^", "~", ".",
+                "[", "]", ">>>", "<<", ">>", "->", "=>", "::", ":", "==", "!=", "<=", ">=", "&&",
+                "||", "(", ")", "{", "}", ";", ",", "+", "-", "*", "/", "%", "=", "!", "<", ">",
+                "&", "|", "^", "~", ".",
             ]
             .into_iter()
             .find(|s| source[at..].starts_with(s));

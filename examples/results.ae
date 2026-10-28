@@ -1,0 +1,20 @@
+// A nominal result type with exhaustive handling of every variant.
+enum Outcome { Ok(str), Error(u32), Empty }
+
+fn describe(value:Outcome)->str {
+    match value {
+        Outcome::Ok(text) => { return text; },
+        Outcome::Error(code) => {
+            printi(code);
+            return "operation failed";
+        },
+        Outcome::Empty => { return "no value"; }
+    }
+}
+
+fn main() {
+    let result=Outcome::Ok("Aegis"+" result");
+    println(describe(result));
+    result=Outcome::Error(5);
+    println(describe(result));
+}

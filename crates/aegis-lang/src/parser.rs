@@ -25,6 +25,7 @@ pub(crate) enum Type {
     Array(Arc<Type>, usize),
     Dyn(Arc<Type>),
     Record(Arc<Record>),
+    Enum(Arc<EnumType>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Record {
@@ -33,9 +34,17 @@ pub(crate) struct Record {
     pub slots: usize,
     pub depth: usize,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EnumType {
+    pub name: String,
+    pub variants: Vec<(String, Option<Type>)>,
+    pub slots: usize,
+    pub depth: usize,
+    pub owned_sites: usize,
+}
 impl Type {
     pub fn aggregate(&self) -> bool {
-        matches!(self, Self::Array(..) | Self::Record(_))
+        matches!(self, Self::Array(..) | Self::Record(_) | Self::Enum(_))
     }
     // Dynamic arrays are one-slot owned pointers with heap-side elements.
     pub fn dyn_array(&self) -> bool {
@@ -48,6 +57,7 @@ impl Type {
     pub fn array(element: Self, len: usize) -> Option<Self> {
         if !(1..=256).contains(&len)
             || element.slots().checked_mul(len)? > 256
+            || element.owned_sites().checked_mul(len)? > 1024
             || element.depth() >= 32
         {
             return None;
@@ -70,6 +80,7 @@ impl Type {
     pub fn depth(&self) -> usize {
         match self {
             Self::Record(record) => record.depth,
+            Self::Enum(enumeration) => enumeration.depth,
             Self::Array(element, _) => element.depth() + 1,
             _ => 0,
         }
@@ -79,8 +90,19 @@ impl Type {
             element.slots() * len
         } else if let Self::Record(record) = self {
             record.slots
+        } else if let Self::Enum(enumeration) = self {
+            enumeration.slots
         } else {
             1
+        }
+    }
+    pub fn owned_sites(&self) -> usize {
+        match self {
+            Self::Str | Self::Dyn(_) => 1,
+            Self::Enum(enumeration) => enumeration.owned_sites,
+            Self::Array(element, len) => element.owned_sites() * len,
+            Self::Record(record) => record.fields.iter().map(|(_, ty)| ty.owned_sites()).sum(),
+            _ => 0,
         }
     }
     pub fn integer(&self) -> bool {
@@ -129,6 +151,9 @@ impl std::fmt::Display for Type {
         if let Self::Record(record) = self {
             return f.write_str(&record.name);
         }
+        if let Self::Enum(enumeration) = self {
+            return f.write_str(&enumeration.name);
+        }
         if let Self::Array(_, len) = self {
             return write!(f, "[{}; {len}]", self.element().expect("array element"));
         }
@@ -148,7 +173,7 @@ impl std::fmt::Display for Type {
             Self::F32 => "f32",
             Self::Bool => "bool",
             Self::Str => "str",
-            Self::Array(..) | Self::Dyn(_) | Self::Record(_) => unreachable!(),
+            Self::Array(..) | Self::Dyn(_) | Self::Record(_) | Self::Enum(_) => unreachable!(),
         })
     }
 }
@@ -210,6 +235,14 @@ pub(crate) struct Stmt {
     pub span: Range<usize>,
 }
 #[derive(Debug)]
+pub(crate) struct MatchArm {
+    pub enumeration: Arc<EnumType>,
+    pub variant: usize,
+    pub binding: Option<String>,
+    pub body: Vec<Stmt>,
+    pub span: Range<usize>,
+}
+#[derive(Debug)]
 pub(crate) enum StmtKind {
     Let(String, Option<Type>, Expr),
     Assign(String, Expr),
@@ -220,6 +253,7 @@ pub(crate) enum StmtKind {
     While(Expr, Vec<Stmt>),
     Block(Vec<Stmt>),
     Unsafe(Vec<Stmt>),
+    Match(Expr, Vec<MatchArm>),
     Builtin(Keyword, Expr),
     Break,
     Continue,
@@ -240,6 +274,7 @@ pub(crate) enum ExprKind {
     Array(Vec<Expr>),
     Repeat(Box<Expr>, usize),
     Record(Arc<Record>, Vec<(String, Expr)>),
+    Variant(Arc<EnumType>, usize, Option<Box<Expr>>),
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Len(Box<Expr>),
@@ -274,6 +309,8 @@ pub(crate) fn parse(source: &str, tokens: Vec<Token>) -> Result<Program, Diagnos
         at: 0,
         depth: 0,
         records: HashMap::new(),
+        enums: HashMap::new(),
+        pending_enums: HashMap::new(),
         pending_records: HashMap::new(),
         resolving_records: Vec::new(),
         module: String::new(),
@@ -293,6 +330,8 @@ struct Parser<'a> {
     at: usize,
     depth: usize,
     records: HashMap<String, Arc<Record>>,
+    enums: HashMap<String, Arc<EnumType>>,
+    pending_enums: HashMap<String, (usize, String)>,
     pending_records: HashMap<String, (usize, String)>,
     resolving_records: Vec<String>,
     module: String,
@@ -376,8 +415,8 @@ impl Parser<'_> {
         let mut count = 1;
         while self.sym("::") {
             count += 1;
-            if count > 17 {
-                return Err(self.error("path limit exceeded (17 components)"));
+            if count > 18 {
+                return Err(self.error("path limit exceeded (18 components)"));
             }
             name.push_str("::");
             name.push_str(&self.name()?);
@@ -391,6 +430,7 @@ impl Parser<'_> {
         let exists = |candidate: &str| {
             if record {
                 self.pending_records.contains_key(candidate)
+                    || self.pending_enums.contains_key(candidate)
             } else {
                 self.function_names.contains(candidate)
             }
@@ -435,6 +475,7 @@ impl Parser<'_> {
             self.modules.contains(name)
                 || self.function_names.contains(name)
                 || self.pending_records.contains_key(name)
+                || self.pending_enums.contains_key(name)
         };
         for import in &self.imports {
             if exists(&import.name) || self.bindings.contains_key(&import.name) {
@@ -509,7 +550,11 @@ impl Parser<'_> {
             let resolved = self.lookup(&name, true).ok_or_else(|| {
                 Diagnostic::new(self.source, span.clone(), format!("unknown type: {name}"))
             })?;
-            return self.resolve_record(&resolved, span).map(Type::Record);
+            return if self.pending_enums.contains_key(&resolved) {
+                self.resolve_enum(&resolved, span).map(Type::Enum)
+            } else {
+                self.resolve_record(&resolved, span).map(Type::Record)
+            };
         }
         let ty = match self.token().kind {
             Kind::Keyword(Keyword::I64) => Type::I64,
@@ -569,6 +614,9 @@ impl Parser<'_> {
         if slots > 256 {
             return Err(self.error("struct layout limit exceeded (256 slots)"));
         }
+        if fields.iter().map(|(_, ty)| ty.owned_sites()).sum::<usize>() > 1024 {
+            return Err(self.error("owned layout limit exceeded (1024 sites)"));
+        }
         let depth = fields.iter().map(|(_, ty)| ty.depth()).max().unwrap_or(0) + 1;
         if depth > 32 {
             return Err(self.error("struct nesting limit exceeded (32)"));
@@ -619,6 +667,114 @@ impl Parser<'_> {
         self.module = saved_module;
         self.records.insert(name.to_owned(), record.clone());
         Ok(record)
+    }
+    fn resolve_enum(
+        &mut self,
+        name: &str,
+        span: Range<usize>,
+    ) -> Result<Arc<EnumType>, Diagnostic> {
+        if let Some(enumeration) = self.enums.get(name) {
+            return Ok(enumeration.clone());
+        }
+        let Some((start, module)) = self.pending_enums.get(name).cloned() else {
+            return Err(Diagnostic::new(
+                self.source,
+                span,
+                format!("unknown enum: {name}"),
+            ));
+        };
+        if self.resolving_records.iter().any(|active| active == name) {
+            return Err(Diagnostic::new(
+                self.source,
+                span,
+                format!("cyclic enum layout: {name}"),
+            ));
+        }
+        if self.resolving_records.len() >= 32 {
+            return Err(Diagnostic::new(
+                self.source,
+                span,
+                "type nesting limit exceeded (32)",
+            ));
+        }
+        let saved = self.at;
+        let saved_module = std::mem::replace(&mut self.module, module);
+        self.at = start;
+        self.resolving_records.push(name.to_owned());
+        self.name()?;
+        self.expect("{")?;
+        let mut variants: Vec<(String, Option<Type>)> = Vec::new();
+        while !self.sym("}") {
+            let variant = self.name()?;
+            if variants.iter().any(|(n, _)| *n == variant) {
+                return Err(self.error("enum variant already defined"));
+            }
+            let payload = if self.sym("(") {
+                let ty = self.type_name()?;
+                self.expect(")")?;
+                Some(ty)
+            } else {
+                None
+            };
+            variants.push((variant, payload));
+            if variants.len() > 128 {
+                return Err(self.error("enum variant limit exceeded (128)"));
+            }
+            if self.sym("}") {
+                break;
+            }
+            self.expect(",")?;
+        }
+        if variants.is_empty() {
+            return Err(self.error("enum must have at least one variant"));
+        }
+        let payload = variants.iter().filter_map(|(_, ty)| ty.as_ref());
+        let slots = 1 + payload.clone().map(Type::slots).max().unwrap_or(0);
+        let depth = 1 + payload.clone().map(Type::depth).max().unwrap_or(0);
+        let owned_sites: usize = payload.map(Type::owned_sites).sum();
+        if slots > 256 || depth > 32 {
+            return Err(self.error("enum layout limit exceeded (256 slots / 32 levels)"));
+        }
+        if owned_sites > 1024 {
+            return Err(self.error("owned layout limit exceeded (1024 sites)"));
+        }
+        let enumeration = Arc::new(EnumType {
+            name: name.to_owned(),
+            variants,
+            slots,
+            depth,
+            owned_sites,
+        });
+        self.resolving_records.pop();
+        self.at = saved;
+        self.module = saved_module;
+        self.enums.insert(name.to_owned(), enumeration.clone());
+        Ok(enumeration)
+    }
+    fn variant_path(&mut self, path: &str) -> Result<Option<(Arc<EnumType>, usize)>, Diagnostic> {
+        let Some((prefix, variant)) = path.rsplit_once("::") else {
+            return Ok(None);
+        };
+        let Some(name) = self.lookup(prefix, true) else {
+            return Ok(None);
+        };
+        if !self.pending_enums.contains_key(&name) {
+            return Ok(None);
+        }
+        let span = self.tokens[self.at.saturating_sub(1)].span.clone();
+        let enumeration = self.resolve_enum(&name, span.clone())?;
+        let index = enumeration
+            .variants
+            .iter()
+            .position(|(n, _)| n == variant)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    self.source,
+                    span,
+                    format!("unknown variant {variant} in {name}"),
+                )
+            })?;
+        Ok(Some((enumeration, index)))
     }
     // Index all declarations before resolving any references. Scanning bodies is
     // iterative; module recursion is separately bounded and never reads files.
@@ -695,13 +851,26 @@ impl Parser<'_> {
                 Keyword::Fn
             } else if self.kw(Keyword::Struct) {
                 Keyword::Struct
+            } else if self.kw(Keyword::Enum) {
+                Keyword::Enum
             } else {
                 return Err(self.error("expected function definition, struct, mod or use"));
             };
             let name_at = self.at;
             let short = self.name()?;
             let name = self.qualify(&short);
-            if kind == Keyword::Struct {
+            if kind == Keyword::Enum {
+                if self
+                    .pending_enums
+                    .insert(name.clone(), (name_at, self.module.clone()))
+                    .is_some()
+                {
+                    return Err(self.error("enum already defined"));
+                }
+                if self.pending_enums.len() > 128 {
+                    return Err(self.error("enum limit exceeded (128)"));
+                }
+            } else if kind == Keyword::Struct {
                 if self
                     .pending_records
                     .insert(name.clone(), (name_at, self.module.clone()))
@@ -758,8 +927,23 @@ impl Parser<'_> {
     }
     fn program(mut self) -> Result<Program, Diagnostic> {
         self.collect_items(false, 0)?;
+        for item in &self.items {
+            if item.kind == Keyword::Enum
+                && (self.pending_records.contains_key(&item.name)
+                    || self.modules.contains(&item.name))
+            {
+                return Err(Diagnostic::new(
+                    self.source,
+                    self.tokens[item.start].span.clone(),
+                    "enum conflicts with a struct or module",
+                ));
+            }
+        }
         self.resolve_imports()?;
         for item in self.items.clone() {
+            if item.kind == Keyword::Enum {
+                self.resolve_enum(&item.name, self.tokens[item.start].span.clone())?;
+            }
             if item.kind == Keyword::Struct {
                 self.resolve_record(&item.name, self.tokens[item.start].span.clone())?;
             }
@@ -933,6 +1117,41 @@ impl Parser<'_> {
                 Vec::new()
             };
             StmtKind::If(condition, yes, no)
+        } else if self.kw(Keyword::Match) {
+            let value = self.expr(1)?;
+            self.expect("{")?;
+            let mut arms = Vec::new();
+            while !self.sym("}") {
+                let start = self.token().span.start;
+                let path = self.path()?;
+                let (enumeration, variant) = self
+                    .variant_path(&path)?
+                    .ok_or_else(|| self.error("match arm requires an enum variant path"))?;
+                let binding = if self.sym("(") {
+                    let name = self.name()?;
+                    self.expect(")")?;
+                    Some(name)
+                } else {
+                    None
+                };
+                self.expect("=>")?;
+                let body = self.block()?;
+                arms.push(MatchArm {
+                    enumeration,
+                    variant,
+                    binding,
+                    body,
+                    span: start..self.tokens[self.at - 1].span.end,
+                });
+                if arms.len() > 128 {
+                    return Err(self.error("match arm limit exceeded (128)"));
+                }
+                if self.sym("}") {
+                    break;
+                }
+                self.expect(",")?;
+            }
+            StmtKind::Match(value, arms)
         } else if self.kw(Keyword::While) {
             let cond = self.condition()?;
             StmtKind::While(cond, self.block()?)
@@ -1151,10 +1370,24 @@ impl Parser<'_> {
             }
             Kind::Ident | Kind::Sym("::") => {
                 let name = self.path()?;
+                let variant = self.variant_path(&name)?;
                 let record = self
                     .lookup(&name, true)
                     .and_then(|name| self.records.get(&name).cloned());
-                if let Some(record) = record
+                if let Some((enumeration, index)) = variant {
+                    let payload = if self.sym("(") {
+                        if self.sym(")") {
+                            None
+                        } else {
+                            let value = self.expr(1)?;
+                            self.expect(")")?;
+                            Some(Box::new(value))
+                        }
+                    } else {
+                        None
+                    };
+                    ExprKind::Variant(enumeration, index, payload)
+                } else if let Some(record) = record
                     && self.sym("{")
                 {
                     let mut fields = Vec::new();
@@ -1223,6 +1456,7 @@ impl Parser<'_> {
             | ExprKind::Repeat(e, _) => e.depth + 1,
             ExprKind::Push(a, v) => a.depth.max(v.depth) + 1,
             ExprKind::Field(e, _) => e.depth + 1,
+            ExprKind::Variant(_, _, payload) => payload.as_ref().map_or(1, |e| e.depth + 1),
             ExprKind::Record(_, fields) => {
                 fields.iter().map(|(_, e)| e.depth).max().unwrap_or(0) + 1
             }

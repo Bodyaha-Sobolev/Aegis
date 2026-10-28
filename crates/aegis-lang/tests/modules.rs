@@ -60,7 +60,7 @@ fn module_and_path_limits_protect_the_frontend() {
         .join("::");
     compile(&nested(16).replace("fn main() {}", &format!("fn main() {{ {path}::f(); }}")))
         .expect("17-component item path");
-    let too_long = (0..18).map(|_| "a").collect::<Vec<_>>().join("::");
+    let too_long = (0..19).map(|_| "a").collect::<Vec<_>>().join("::");
     assert!(
         compile(&format!("fn main() {{ {too_long}(); }}"))
             .expect_err("path limit")
