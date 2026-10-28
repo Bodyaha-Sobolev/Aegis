@@ -29,7 +29,9 @@ fn inspects_native_compiler_output_without_mutating_it() {
             Symbol::Name("HeapFree".into()),
             Symbol::Name("LoadLibraryExW".into()),
             Symbol::Name("GetProcAddress".into()),
-            Symbol::Name("GetSystemDirectoryW".into())
+            Symbol::Name("GetSystemDirectoryW".into()),
+            Symbol::Name("GetLastError".into()),
+            Symbol::Name("SetLastError".into())
         ]
     );
 }

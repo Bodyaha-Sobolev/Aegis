@@ -453,7 +453,7 @@ impl Generator<'_> {
         let resolved = self.jump(Some(0x85));
         // Save every register argument before the resolver uses volatile regs.
         // Two saved nonvolatile registers and 104 local bytes align the call
-        // frame: 32 shadow + 64 saved arguments + 8 padding.
+        // frame: 32 shadow + 64 saved arguments + last-error DWORD + padding.
         self.bytes(&[0x53, 0x41, 0x54, 0x48, 0x83, 0xec, 104]);
         for (index, opcode) in [
             [0x48, 0x89, 0x4c, 0x24],
@@ -475,6 +475,9 @@ impl Generator<'_> {
                 (64 + index * 8) as u8,
             ]);
         }
+        // Resolver APIs and DllMain may change per-thread LastError. Preserve
+        // the caller's value before resolving, then restore before the tail call.
+        self.bytes(&[0x41, 0xff, 0x57, 0x48, 0x89, 0x44, 0x24, 96]);
         if external.flags == 0x800 {
             // Build an absolute System32 path, so an already-loaded DLL with
             // the same basename cannot redirect the bare-name request.
@@ -534,6 +537,7 @@ impl Generator<'_> {
         self.here(symbol_ok);
         self.bytes(&[0x49, 0x89, 0x87]);
         self.dword(slot as u32);
+        self.bytes(&[0x8b, 0x4c, 0x24, 96, 0x41, 0xff, 0x57, 0x50]);
         for (index, opcode) in [
             [0x48, 0x8b, 0x4c, 0x24],
             [0x48, 0x8b, 0x54, 0x24],
@@ -2765,7 +2769,7 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
     dword(&mut b, o + 0x98, reloc_rva);
     dword(&mut b, o + 0x9c, 12);
     dword(&mut b, o + 0xd0, IMPORTS + 0x40);
-    dword(&mut b, o + 0xd4, 10 * 8);
+    dword(&mut b, o + 0xd4, 12 * 8);
     for (i, name, rva, raw, size, flags) in [
         (0, b".text\0\0\0", TEXT, 0x400, 0x10000, 0x60000020),
         (1, b".idata\0\0", IMPORTS, 0x10400, 0x400, 0xc0000040),
@@ -2812,9 +2816,9 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
     dword(&mut b, reloc_raw + 4, 12);
     let i = 0x10400;
     dword(&mut b, i, IMPORTS + 0x40);
-    dword(&mut b, i + 12, IMPORTS + 0x90);
+    dword(&mut b, i + 12, IMPORTS + 0xa0);
     dword(&mut b, i + 16, IMPORTS + 0x40);
-    b[i + 0x90..i + 0x9d].copy_from_slice(b"KERNEL32.DLL\0");
+    b[i + 0xa0..i + 0xad].copy_from_slice(b"KERNEL32.DLL\0");
     // Runtime slots retain their order; lazy external pointers occupy 0x200..0x400.
     let mut name_at = 0xb0usize;
     for (index, name) in [
@@ -2827,6 +2831,8 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
         "LoadLibraryExW",
         "GetProcAddress",
         "GetSystemDirectoryW",
+        "GetLastError",
+        "SetLastError",
     ]
     .iter()
     .enumerate()

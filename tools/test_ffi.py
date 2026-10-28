@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 
 from test_windows_abi import cases, prepare_dll
+from windows_aslr import run_relocated
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = Path(os.environ.get('AEGIS_COMPILER', ROOT/'target/debug/aegis-cli.exe')).resolve()
@@ -68,6 +69,38 @@ def check(folder, name, source, stdout, code=0):
     print('PASS FFI', name, flush=True)
 
 
+def last_error_dll(folder, name='last_error', clobber_on_attach=False):
+    # Independent C ABI producer: return numeric values while reading/writing
+    # Win32's per-thread last-error state. No Aegis runtime or CRT is involved.
+    program_files = Path(os.environ['ProgramFiles(x86)'])
+    vswhere = program_files/'Microsoft Visual Studio/Installer/vswhere.exe'
+    result = run(vswhere, '-latest', '-products', '*', '-requires',
+                 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath', '-utf8')
+    if result.returncode or not result.stdout.strip():
+        raise AssertionError('MSVC x64 installation required for independent last-error fixture')
+    installation = Path(result.stdout.decode('utf-8').strip())
+    compilers = sorted((installation/'VC/Tools/MSVC').glob('*/bin/Hostx64/x64/cl.exe'))
+    libraries = sorted((program_files/'Windows Kits/10/Lib').glob('*/um/x64/kernel32.lib'))
+    if not compilers or not libraries:
+        raise AssertionError('MSVC x64 compiler and Windows SDK required')
+    src, obj, dll = folder/(name+'.c'), folder/(name+'.obj'), folder/(name+'.dll')
+    source = '''__declspec(dllimport) void __stdcall SetLastError(unsigned long);
+__declspec(dllimport) unsigned long __stdcall GetLastError(void);
+__declspec(dllexport) unsigned long SetProbe(unsigned long value) { SetLastError(value); return value; }
+__declspec(dllexport) unsigned long GetProbe(void) { return GetLastError(); }
+'''
+    if clobber_on_attach:
+        source += 'int __stdcall AegisFixtureEntry(void* module, unsigned long reason, void* reserved) { if (reason == 1) SetLastError(287454020UL); return 1; }\n'
+    src.write_text(source, encoding='ascii')
+    result = run(compilers[-1], '/nologo', '/LD', '/GS-', '/O2', '/Fo'+str(obj), src,
+                 '/link', '/ENTRY:AegisFixtureEntry' if clobber_on_attach else '/NOENTRY',
+                 '/NODEFAULTLIB', '/INCREMENTAL:NO', '/OUT:'+str(dll),
+                 '/IMPLIB:'+str(folder/(name+'.lib')), libraries[-1], cwd=folder)
+    if result.returncode:
+        raise AssertionError(('independent C fixture', result.stdout, result.stderr))
+    return dll
+
+
 def main():
     artifacts = ROOT/'artifacts'
     artifacts.mkdir(exist_ok=True)
@@ -112,6 +145,29 @@ def main():
         calls = ''.join(f'sum=sum+external_fn_{i}(9,10,3);' for i in range(64))
         check(folder, 'all_64_slots', declarations+'fn main() { let sum:i32=0; unsafe { '+calls+' } printi(sum); }', b'1920\n')
         checks += 1
+        state_dll = last_error_dll(folder)
+        state_path = json.dumps(str(state_dll), ensure_ascii=False)
+        getter_dll = last_error_dll(folder, 'last_error_getter', True)
+        getter_path = json.dumps(str(getter_dll), ensure_ascii=False)
+        setter = f'unsafe extern {state_path} fn set_error(value:u32)->u32="SetProbe";'
+        body = 'fn main() { unsafe { set_error(305419896); let first=last_error(); printi(first); set_error(2271560481); printi(last_error()); } }'
+        check(folder, 'last_error_system32', setter+'unsafe extern "kernel32.dll" fn last_error()->u32="GetLastError";'+body, b'305419896\n2271560481\n')
+        check(folder, 'last_error_foreign', setter+f'unsafe extern {getter_path} fn last_error()->u32="GetProbe";'+body, b'305419896\n2271560481\n')
+        checks += 2
+        relocated = [
+            ('system32', 'unsafe extern "kernel32.dll" fn scale(a:i32,b:i32,c:i32)->i32="MulDiv"; fn main() { unsafe { if(scale(-9,10,3)!=-30) { return 99; } } return 7; }'),
+            ('absolute_unicode', f'unsafe extern {path} fn foreign(a:u64)->u64="Probe"; fn main() {{ unsafe {{ if(foreign(0xfedcba9876543210)!=0xfedcba9876543210) {{ return 99; }} }} return 7; }}'),
+        ]
+        for name, source in relocated:
+            exe = compile_source(folder, 'relocated_'+name, source)
+            data = exe.read_bytes()
+            nt = struct.unpack_from('<I', data, 0x3c)[0]
+            preferred = struct.unpack_from('<Q', data, nt+24+24)[0]
+            base, code = run_relocated(exe)
+            if base == preferred or base <= 0xffffffff or code != 7:
+                raise AssertionError(('FFI mandatory ASLR', name, hex(base), code))
+            print('PASS FFI mandatory ASLR', name, hex(base), flush=True)
+            checks += 1
     print(f'{checks} native FFI checks passed')
 
 
