@@ -48,10 +48,26 @@ class DebugEvent(c.Structure):
                 ('data', EventData)]
 
 
-def run_relocated(exe, timeout=15):
+class JobBasicLimits(c.Structure):
+    _fields_ = [('process_time', c.c_int64), ('job_time', c.c_int64),
+                ('flags', w.DWORD), ('minimum_working_set', c.c_size_t),
+                ('maximum_working_set', c.c_size_t), ('active_processes', w.DWORD),
+                ('affinity', c.c_size_t), ('priority', w.DWORD), ('scheduling', w.DWORD)]
+
+
+class JobExtendedLimits(c.Structure):
+    _fields_ = [('basic', JobBasicLimits), ('io_counters', c.c_uint64 * 6),
+                ('process_memory', c.c_size_t), ('job_memory', c.c_size_t),
+                ('peak_process_memory', c.c_size_t), ('peak_job_memory', c.c_size_t)]
+
+
+def run_relocated(exe, timeout=15, *, memory_limit=None):
     """Return (observed image base, exit code) for this newly created child."""
     assert c.sizeof(c.c_void_p) == 8, 'ASLR verification requires 64-bit Python'
     assert c.sizeof(StartupInfo) == 104 and c.sizeof(DebugEvent) == 176
+    assert c.sizeof(JobBasicLimits) == 64 and c.sizeof(JobExtendedLimits) == 144
+    if memory_limit is not None and not 16*1024*1024 <= memory_limit <= 1024*1024*1024:
+        raise ValueError('test child commit limit must be between 16 MiB and 1 GiB')
     k = c.WinDLL('kernel32', use_last_error=True)
     signatures = {
         'InitializeProcThreadAttributeList': ([c.c_void_p, w.DWORD, w.DWORD, c.POINTER(c.c_size_t)], w.BOOL),
@@ -64,6 +80,9 @@ def run_relocated(exe, timeout=15):
         'DebugActiveProcessStop': ([w.DWORD], w.BOOL),
         'WaitForSingleObject': ([w.HANDLE, w.DWORD], w.DWORD),
         'CloseHandle': ([w.HANDLE], w.BOOL),
+        'CreateJobObjectW': ([c.c_void_p, w.LPCWSTR], w.HANDLE),
+        'SetInformationJobObject': ([w.HANDLE, c.c_int, c.c_void_p, w.DWORD], w.BOOL),
+        'AssignProcessToJobObject': ([w.HANDLE, w.HANDLE], w.BOOL),
     }
     for name, (args, result) in signatures.items():
         fn = getattr(k, name)
@@ -81,7 +100,18 @@ def run_relocated(exe, timeout=15):
     checked(k.InitializeProcThreadAttributeList(attributes, 1, 0, c.byref(size)))
     info = ProcessInfo()
     finished = False
+    job = None
     try:
+        if memory_limit is not None:
+            job = k.CreateJobObjectW(None, None)
+            checked(job)
+            limits = JobExtendedLimits()
+            # PROCESS_MEMORY | KILL_ON_JOB_CLOSE. A fresh unnamed job owns only
+            # the fixture child created below; no PID lookup or global settings.
+            # https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information
+            limits.basic.flags = 0x100 | 0x2000
+            limits.process_memory = memory_limit
+            checked(k.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
         # ForceRelocateImages + RequireRelocations, BottomUpASLR, HighEntropyASLR.
         # UpdateProcThreadAttribute / PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY.
         policy = c.c_uint64(0x300 | 0x10000 | 0x100000)
@@ -96,6 +126,10 @@ def run_relocated(exe, timeout=15):
         flags = 0x2 | 0x80000 | 0x8000000
         checked(k.CreateProcessW(path, command, None, None, False, flags,
                                 None, None, c.byref(startup), c.byref(info)))
+        if job:
+            # The debug-created child cannot run past its initial debug event
+            # before ContinueDebugEvent below, so application allocations are capped.
+            checked(k.AssignProcessToJobObject(job, info.process))
         deadline = time.monotonic() + timeout
         base = None
         initial_breakpoint = False
@@ -139,4 +173,6 @@ def run_relocated(exe, timeout=15):
                 k.WaitForSingleObject(info.process, 5000)
             k.CloseHandle(info.thread)
             k.CloseHandle(info.process)
+        if job:
+            k.CloseHandle(job)
         k.DeleteProcThreadAttributeList(attributes)

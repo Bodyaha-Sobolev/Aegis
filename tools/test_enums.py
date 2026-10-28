@@ -32,6 +32,18 @@ def cases():
     yield 'all_128_variants', f'enum E {{{variants}}} fn main(){{match E::V127 {{{arms}}}}}', b'127\n'
 
 
+def memory_cases():
+    # Each iteration allocates >4 KiB. 30,000 unreclaimed allocations would
+    # exceed 117 MiB, far above the child's 32 MiB commit limit.
+    text = '"' + 'x'*4096 + '"+"!"'
+    header = 'enum E { Text(str), Number(i64), Empty } '
+    yield 'discard_enum', header+f'fn make()->E{{return E::Text({text});}} fn main(){{let i=0; while(i<30000){{make(); i=i+1;}} return 7;}}'
+    yield 'discard_record', f'struct P{{s:str}} fn make()->P{{return P{{s:{text}}};}} fn main(){{let i=0; while(i<30000){{make(); i=i+1;}} return 7;}}'
+    yield 'nested_copy_switch', header+'enum Outer { Value(E), Number(i64) } '+f'fn main(){{let i=0; while(i<30000){{let a=[Outer::Value(E::Text({text}));3]; let b=a; a[1]=Outer::Number(1); a[0]=a[2]; i=i+1;}} return 7;}}'
+    yield 'match_return', header+'fn take(e:E)->str{match e{E::Text(t)=>{return t;}, E::Number(_)=>{return "";}, E::Empty=>{return "";}}} '+f'fn main(){{let i=0; while(i<30000){{let s=take(E::Text({text})); if(len(s)!=4097){{return 1;}} i=i+1;}} return 7;}}'
+    yield 'loop_control', header+f'fn main(){{let i=0; while(i<30000){{i=i+1; match E::Text({text}){{E::Text(t)=>{{if(len(t)!=4097){{return 1;}} if(i<30000){{continue;}} break;}}, E::Number(_)=>{{}}, E::Empty=>{{}}}}}} return 7;}}'
+
+
 def main():
     root = (ROOT / 'artifacts').resolve()
     root.mkdir(exist_ok=True)
@@ -56,6 +68,28 @@ def main():
         assert base > 0xffffffff and code == 7, (base, code)
         count += 1
         print('PASS enum forced ASLR')
+        cap = 32*1024*1024
+        for name, source in memory_cases():
+            src, exe = folder / (name+'.ae'), folder / (name+'.exe')
+            src.write_text(source, encoding='utf-8')
+            built = run(COMPILER, 'build', src, exe)
+            assert built.returncode == 0, (name, built.stdout, built.stderr)
+            _, code = run_relocated(exe, timeout=30, memory_limit=cap)
+            assert code == 7, (name, 'bounded ownership workload failed', code)
+            count += 1
+            print('PASS enum 32 MiB commit cap', name)
+        # Positive control: these allocations remain reachable. The same valid
+        # program must succeed normally and fail allocation under the cap.
+        source = 'fn main(){let a:[str]=[]; let i=0; while(i<20000){a=push(a,"'+'x'*4096+'"+"!"); i=i+1;} if(len(a)!=20000){return 1;} return 7;}'
+        src, exe = folder / 'retained.ae', folder / 'retained.exe'
+        src.write_text(source, encoding='utf-8')
+        built = run(COMPILER, 'build', src, exe)
+        assert built.returncode == 0, (built.stdout, built.stderr)
+        assert run(exe).returncode == 7, 'retained control must succeed uncapped'
+        _, code = run_relocated(exe, timeout=30, memory_limit=cap)
+        assert code == 74, ('commit cap did not reject retained allocations', code)
+        count += 2
+        print('PASS memory cap retained-allocation control (uncapped and capped)')
     print(f'{count} enum native checks passed')
 
 
