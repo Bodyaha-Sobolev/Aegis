@@ -655,6 +655,18 @@ def main():
         ('dyn_large_repeat_once', 'fn item() -> str { printi(7); return "x" + "y"; } fn main() { let a: [str] = [item(); 20000]; println(a[19999]); printi(len(a)); }', b'7\nxy\n20000\n', 0),
         ('heap_allocation_limit', 'fn main() { let s = "x"; let i = 0; while(i < 30) { s = s + s; i = i + 1; } }', b'', 73),
         ('dyn_unique_set_stress', 'fn main() { let a: [i64] = [0; 100000]; let words: [str] = ["x" + "y", "a" + "b"]; let i = 0; while(i < 100000) { a[i] = i; words[0] = words[1]; i = i + 1; } printi(a[99999]); println(words[0]); }', b'99999\nab\n', 0),
+        ('dyn_grow_million', 'fn main() { let a: [i64] = []; let i = 0; while(i < 1048576) { a = push(a, i); i = i + 1; } printi(len(a)); printi(a[0]); printi(a[65536]); printi(a[1048575]); a = push(a, 9); }', b'1048576\n0\n65536\n1048575\n', 73),
+        ('dyn_grow_boundaries', 'fn main() { let a: [i64] = []; let i = 0; while(i < 65537) { a = push(a, i * 3); i = i + 1; } let sum = 0; i = 0; while(i < len(a)) { sum = sum + a[i]; i = i + 1; } printi(len(a)); printi(a[1]); printi(a[2]); printi(a[3]); printi(a[7]); printi(a[8]); printi(a[65536]); printi(sum); }', b'65537\n3\n6\n9\n21\n24\n196608\n6442549248\n', 0),
+        ('dyn_grow_alias_with_capacity', 'fn main() { let a: [i64] = [10, 20, 30]; let b = a; a = push(a, 40); b[0] = 99; printi(a[0]); printi(a[3]); printi(len(b)); printi(b[0]); }', b'10\n40\n3\n99\n', 0),
+        ('dyn_grow_string_alias_drop', 'fn main() { let a: [str] = ["a" + "!", "b" + "!", "c" + "!"]; let b = a; a = push(a, a[0]); b = []; let i = 0; while(i < 1000) { let noise = "reuse" + "heap"; i = i + 1; } println(a[0]); println(a[2]); println(a[3]); a = push(a, a[3]); println(a[4]); }', b'a!\nc!\na!\na!\n', 0),
+        ('dyn_grow_string_unique', 'fn main() { let a: [str] = []; let i = 0; while(i < 20000) { a = push(a, "hello" + "!"); i = i + 1; } println(a[0]); println(a[19999]); printi(len(a)); let b = a; a = push(a, "tail" + "!"); println(b[19999]); println(a[20000]); printi(len(b)); }', b'hello!\nhello!\n20000\nhello!\ntail!\n20000\n', 0),
+        ('dyn_grow_rhs_order', 'fn element(a: [i64]) -> i64 { printi(len(a)); return a[0] + len(a); } fn main() { let a: [i64] = [10]; a = push(a, element(a)); a = push(a, element(a)); printi(a[1]); printi(a[2]); }', b'1\n2\n11\n12\n', 0),
+        ('dyn_grow_nested_temporary', 'fn values() -> [str] { return ["one" + "!"]; } fn main() { let a = push(push(push(values(), "two" + "!"), "three" + "!"), "four" + "!"); println(a[0]); println(a[1]); println(a[2]); println(a[3]); }', b'one!\ntwo!\nthree!\nfour!\n', 0),
+        ('dyn_grow_float_bits', 'fn main() { let a: [f32] = []; let b: [f64] = []; let i = 0; while(i < 1000) { a = push(a, f32(i) * f32(0.5)); b = push(b, f64(i) * 0.25); i = i + 1; } let c = a; a = push(a, f32(-0.0)); printi(c[999]); printi(b[999]); printi(a[1000]); printi(len(c)); }', b'499.500000\n249.750000\n-0.000000\n1000\n', 0),
+        ('dyn_grow_nested_field', 'struct Bag { items: [i64] } struct Outer { bag: Bag } fn main() { let b = Outer { bag: Bag { items: [] } }; let i = 0; while(i < 65537) { b.bag.items = push(b.bag.items, i); i = i + 1; } let c = b; b.bag.items = push(b.bag.items, b.bag.items[0]); printi(len(b.bag.items)); printi(len(c.bag.items)); printi(c.bag.items[65536]); }', b'65538\n65537\n65536\n', 0),
+        ('dyn_grow_string_field', 'struct Bag { items: [str] } fn main() { let b = Bag { items: [] }; let i = 0; while(i < 1000) { b.items = push(b.items, "s" + "!"); i = i + 1; } let copy = b; b.items = push(b.items, b.items[0]); println(b.items[1000]); println(copy.items[999]); printi(len(copy.items)); }', b's!\ns!\n1000\n', 0),
+        ('dyn_grow_fixed_slot_general', 'fn pick() -> i64 { printi(7); return 0; } fn main() { let x: [i64] = [1]; let a = [x]; a[pick()] = push(a[pick()], 2); printi(a[0][1]); printi(len(x)); }', b'7\n7\n2\n1\n', 0),
+        ('dyn_grow_snapshot_per_iteration', 'fn main() { let a: [str] = []; let last: [str] = []; let i = 0; while(i < 1000) { last = a; a = push(a, "x" + "y"); i = i + 1; } printi(len(last)); printi(len(a)); println(last[998]); println(a[999]); }', b'999\n1000\nxy\nxy\n', 0),
     ])
     errors.extend([
         ('dyn_nested_element', 'fn main() { let a: [[i64]] = []; }', b'must be one-slot scalars or str'),
@@ -718,7 +730,8 @@ def main():
         # are only freshly created fixture children; no process-memory access.
         for name in ['aslr_workload', 'string_large_data', 'return_full_frame',
                      'return_32_arguments', 'array_negative_read', 'division_zero',
-                     'dyn_heap_stress', 'dyn_float_elements', 'dyn_unique_set_stress']:
+                     'dyn_heap_stress', 'dyn_float_elements', 'dyn_unique_set_stress',
+                     'dyn_grow_string_unique', 'dyn_grow_nested_field']:
             exe = folder/(name+'.exe')
             data = exe.read_bytes()
             preferred = int.from_bytes(data[0x98+0x18:0x98+0x20], 'little')
@@ -897,7 +910,7 @@ def main():
             result = run(COMPILER, *args)
             assert result.returncode == 2, (args, result.stdout, result.returncode)
         print('PASS invalid CLI commands and dialects')
-    print(f'{len(cases) + len(errors) + 41} checks passed')
+    print(f'{len(cases) + len(errors) + 43} checks passed')
 
 
 if __name__ == '__main__':

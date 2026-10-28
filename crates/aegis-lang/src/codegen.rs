@@ -11,6 +11,9 @@ const IMPORTS: u32 = 0x11000;
 const MAX_CODE: usize = 0x10000;
 const RDATA: u32 = 0x12000;
 const MAX_DATA: usize = 2 * 1024 * 1024;
+// Tagged dynamic-array pointer: rc at -1, len at +7, capacity at +15.
+const DYN_DATA: u8 = 23;
+const MAX_DYN_ELEMENTS: u32 = 1_048_576;
 // Offsets of the f64 constant pool inside .rdata.
 const DATA_HALF: usize = 8;
 const DATA_MILLION: usize = 16;
@@ -284,81 +287,120 @@ impl Generator<'_> {
         self.bytes(bytes);
         self.stack -= 1;
     }
-    // Both operations consume an owned array and (for str) an owned element.
-    // Copy first, then consume: aliases retain independent value semantics.
-    fn dynamic_mutation(&mut self, strings: bool, replace: bool) -> usize {
+    // Push consumes an owned array and element. Unique arrays reuse capacity;
+    // growth moves their elements, while shared arrays copy/retain them.
+    fn dynamic_push(&mut self, strings: bool) -> usize {
         let entry = self.code.len();
-        // Five saved registers put rsp on a 16-byte boundary; 32 bytes are
-        // reserved exclusively for callees, never for persistent locals.
+        // rbx=array, r12=element, r13=fresh block, r14=index, rsi=shared flag.
+        // Five saved registers align rsp; the 32-byte callee area stays separate.
         self.bytes(&[0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x56]);
-        self.bytes(&[0x48, 0x83, 0xec, 0x20, 0x48, 0x89, 0xcb]); // rbx = array
-        if replace {
-            self.bytes(&[0x49, 0x89, 0xd4, 0x4d, 0x89, 0xc5]); // r12=index, r13=value
-            self.bytes(&[0x48, 0x3b, 0x53, 7]);
-            let in_bounds = self.jump(Some(0x82));
-            self.bytes(&[0xb9]);
-            self.dword(72);
-            self.bytes(&[0x41, 0xff, 0x57, 0x10]);
-            self.here(in_bounds);
-        } else {
-            self.bytes(&[0x4c, 0x8b, 0x63, 7, 0x49, 0x89, 0xd5]); // append index,value
-        }
-        let unique_done = if replace {
-            // The destination cell and this consumed argument own one reference
-            // each. Exactly two means no other value can observe the write.
-            self.bytes(&[0x48, 0x83, 0x7b, 0xff, 2]);
-            let shared = self.jump(Some(0x85));
-            if strings {
-                self.bytes(&[0x4a, 0x8b, 0x4c, 0xe3, 15, 0xe8]);
-                self.relative(self.rt_release);
-            }
-            self.bytes(&[0x4e, 0x89, 0x6c, 0xe3, 15, 0x48, 0x89, 0xd8]);
-            let done = self.jump(None);
-            self.here(shared);
-            Some(done)
-        } else {
-            None
-        };
-        self.bytes(&[0x48, 0x8b, 0x4b, 7]); // count
-        if !replace {
-            self.bytes(&[0x48, 0xff, 0xc1]);
-        }
-        self.bytes(&[0xe8]);
+        self.bytes(&[0x48, 0x83, 0xec, 0x20, 0x48, 0x89, 0xcb, 0x49, 0x89, 0xd4]);
+        self.bytes(&[0x48, 0x83, 0x7b, 0xff, 1]); // rc == 1
+        let shared = self.jump(Some(0x85));
+        self.bytes(&[0x48, 0x8b, 0x43, 7, 0x48, 0x3b, 0x43, 15]); // len < capacity
+        let grow = self.jump(Some(0x83));
+        self.bytes(&[0x4c, 0x89, 0x64, 0xc3, DYN_DATA]);
+        self.bytes(&[0x48, 0xff, 0x43, 7, 0x48, 0x89, 0xd8]);
+        let reused = self.jump(None);
+        self.here(grow);
+        self.bytes(&[0x31, 0xf6]); // unique, move elements on growth
+        let allocate = self.jump(None);
+        self.here(shared);
+        self.bytes(&[0xbe, 1, 0, 0, 0]); // shared, retain copied elements
+        self.here(allocate);
+        self.bytes(&[0x48, 0x8b, 0x4b, 7, 0x48, 0xff, 0xc1, 0xe8]);
         self.relative(self.rt_dnew);
-        self.bytes(&[0x49, 0x89, 0xc6, 0x31, 0xf6]); // r14 = fresh tag, rsi = index
-        let copy_loop = self.code.len();
-        self.bytes(&[0x48, 0x3b, 0x73, 7]); // cmp rsi, [rbx+7]
+        self.bytes(&[0x49, 0x89, 0xc5, 0x45, 0x31, 0xf6]); // r13=fresh, r14=index
+        let copy = self.code.len();
+        self.bytes(&[0x4c, 0x3b, 0x73, 7]);
         let copied = self.jump(Some(0x83));
-        let skip_replaced = if replace {
-            self.bytes(&[0x4c, 0x39, 0xe6]); // cmp rsi, r12
-            Some(self.jump(Some(0x84)))
+        self.bytes(&[0x4a, 0x8b, 0x4c, 0xf3, DYN_DATA]);
+        if strings {
+            self.bytes(&[0x48, 0x85, 0xf6]);
+            let moved = self.jump(Some(0x84));
+            self.bytes(&[0xe8]);
+            self.relative(self.rt_retain);
+            self.bytes(&[0x4a, 0x8b, 0x4c, 0xf3, DYN_DATA]);
+            self.here(moved);
+        }
+        self.bytes(&[0x4b, 0x89, 0x4c, 0xf5, DYN_DATA, 0x49, 0xff, 0xc6]);
+        let again = self.jump(None);
+        self.patch(again, copy);
+        self.here(copied);
+        self.bytes(&[0x48, 0x8b, 0x43, 7, 0x4d, 0x89, 0x64, 0xc5, DYN_DATA]);
+        self.bytes(&[0x48, 0x89, 0xd9]);
+        if strings {
+            self.bytes(&[0x48, 0x85, 0xf6]);
+            let moved = self.jump(Some(0x84));
+            self.bytes(&[0xe8]);
+            self.relative(self.rt_drelease_str);
+            let released = self.jump(None);
+            self.here(moved);
+            // Only the old allocation is released after moving its references.
+            self.bytes(&[0xe8]);
+            self.relative(self.rt_release);
+            self.here(released);
         } else {
-            None
-        };
-        self.bytes(&[0x48, 0x8b, 0x4c, 0xf3, 15]);
+            self.bytes(&[0xe8]);
+            self.relative(self.rt_release);
+        }
+        self.bytes(&[0x4c, 0x89, 0xe8]);
+        self.here(reused);
+        self.bytes(&[0x48, 0x83, 0xc4, 0x20]);
+        self.bytes(&[0x5e, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3]);
+        entry
+    }
+    // Element assignment consumes an owned reference; the destination cell
+    // remains an owner until the caller stores the result.
+    fn dynamic_set(&mut self, strings: bool) -> usize {
+        let entry = self.code.len();
+        self.bytes(&[0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x56]);
+        self.bytes(&[0x48, 0x83, 0xec, 0x20, 0x48, 0x89, 0xcb]);
+        self.bytes(&[0x49, 0x89, 0xd4, 0x4d, 0x89, 0xc5]); // index, element
+        self.bytes(&[0x48, 0x3b, 0x53, 7]);
+        let in_bounds = self.jump(Some(0x82));
+        self.bytes(&[0xb9]);
+        self.dword(72);
+        self.bytes(&[0x41, 0xff, 0x57, 0x10]);
+        self.here(in_bounds);
+        // Exactly two references: destination cell plus the consumed argument.
+        self.bytes(&[0x48, 0x83, 0x7b, 0xff, 2]);
+        let shared = self.jump(Some(0x85));
+        if strings {
+            self.bytes(&[0x4a, 0x8b, 0x4c, 0xe3, DYN_DATA, 0xe8]);
+            self.relative(self.rt_release);
+        }
+        self.bytes(&[0x4e, 0x89, 0x6c, 0xe3, DYN_DATA, 0x48, 0x89, 0xd8]);
+        let reused = self.jump(None);
+        self.here(shared);
+        self.bytes(&[0x48, 0x8b, 0x4b, 7, 0xe8]);
+        self.relative(self.rt_dnew);
+        self.bytes(&[0x49, 0x89, 0xc6, 0x31, 0xf6]); // r14=fresh, rsi=index
+        let copy = self.code.len();
+        self.bytes(&[0x48, 0x3b, 0x73, 7]);
+        let copied = self.jump(Some(0x83));
+        self.bytes(&[0x4c, 0x39, 0xe6]);
+        let skip = self.jump(Some(0x84)); // replaced element needs no new reference
+        self.bytes(&[0x48, 0x8b, 0x4c, 0xf3, DYN_DATA]);
         if strings {
             self.bytes(&[0xe8]);
             self.relative(self.rt_retain);
+            self.bytes(&[0x48, 0x8b, 0x4c, 0xf3, DYN_DATA]);
         }
-        self.bytes(&[0x49, 0x89, 0x4c, 0xf6, 15]); // [fresh+rsi*8+15] = element
-        if let Some(skip) = skip_replaced {
-            self.here(skip);
-        }
+        self.bytes(&[0x49, 0x89, 0x4c, 0xf6, DYN_DATA]);
+        self.here(skip);
         self.bytes(&[0x48, 0xff, 0xc6]);
         let again = self.jump(None);
-        self.patch(again, copy_loop);
+        self.patch(again, copy);
         self.here(copied);
-        self.bytes(&[0x4f, 0x89, 0x6c, 0xe6, 15]); // [fresh+r12*8+15] = value
-        self.bytes(&[0x48, 0x89, 0xd9, 0xe8]);
+        self.bytes(&[0x4f, 0x89, 0x6c, 0xe6, DYN_DATA, 0x48, 0x89, 0xd9, 0xe8]);
         self.relative(if strings {
             self.rt_drelease_str
         } else {
             self.rt_release
         });
         self.bytes(&[0x4c, 0x89, 0xf0]);
-        if let Some(done) = unique_done {
-            self.here(done);
-        }
+        self.here(reused);
         self.bytes(&[0x48, 0x83, 0xc4, 0x20]);
         self.bytes(&[0x5e, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3]);
         entry
@@ -826,6 +868,44 @@ impl Generator<'_> {
         }
         Ok(())
     }
+    fn same_storage_path(left: &Expr, right: &Expr) -> bool {
+        match (&left.kind, &right.kind) {
+            (ExprKind::Var(a), ExprKind::Var(b)) => a == b,
+            (ExprKind::Field(a, x), ExprKind::Field(b, y)) => {
+                x == y && Self::same_storage_path(a, b)
+            }
+            // Index expressions may have side effects; retain the general path.
+            _ => false,
+        }
+    }
+    fn push_rebind(&mut self, array: &Expr, element: &Expr) -> Result<(), Diagnostic> {
+        // Both arguments finish before the destination gives up its reference.
+        // The consumed argument keeps the old allocation alive during the call.
+        self.place_address(array)?;
+        self.push(); // destination address
+        self.bytes(&[0x48, 0x8b, 0x00]);
+        self.emit_retain();
+        self.push(); // array
+        self.str_temp(element)?;
+        self.scalar_bits(&element.ty);
+        self.push(); // element
+        self.bytes(&[0x48, 0x8b, 0x4c, 0x24, 16, 0x48, 0x8b, 0x09]);
+        let strings = Self::string_elements(&array.ty);
+        self.emit_release(strings);
+        self.pop(&[0x5a]);
+        self.pop(&[0x59]);
+        let amount = self.reserve_call();
+        self.bytes(&[0xe8]);
+        self.relative(if strings {
+            self.rt_push_str
+        } else {
+            self.rt_push_plain
+        });
+        self.release_call(amount);
+        self.pop(&[0x59]);
+        self.bytes(&[0x48, 0x89, 0x01]);
+        Ok(())
+    }
     fn statement(&mut self, stmt: &Stmt) -> Result<(), Diagnostic> {
         match &stmt.kind {
             StmtKind::Let(name, _, value) => {
@@ -845,6 +925,11 @@ impl Generator<'_> {
             }
             StmtKind::Assign(name, value) => {
                 let slot = self.variable(name, &stmt.span)?;
+                if let ExprKind::Push(array, element) = &value.kind
+                    && matches!(&array.kind, ExprKind::Var(source) if source == name)
+                {
+                    return self.push_rebind(array, element);
+                }
                 if value.ty.aggregate() {
                     return self.store_aggregate(slot, value, true);
                 }
@@ -866,6 +951,11 @@ impl Generator<'_> {
                 }
             }
             StmtKind::IndexAssign(target, value) => {
+                if let ExprKind::Push(array, element) = &value.kind
+                    && Self::same_storage_path(target, array)
+                {
+                    return self.push_rebind(array, element);
+                }
                 if let ExprKind::Index(base, index) = &target.kind
                     && base.ty.dyn_array()
                 {
@@ -1130,7 +1220,7 @@ impl Generator<'_> {
                     self.scalar_bits(&element.ty);
                     self.bytes(&[0x48, 0x8b, 0x0c, 0x24]); // mov rcx, [rsp]
                     self.bytes(&[0x48, 0x89, 0x81]);
-                    self.dword((15 + index * 8) as u32); // mov [rcx+15+i*8], rax
+                    self.dword((usize::from(DYN_DATA) + index * 8) as u32); // mov [rcx+payload+i*8], rax
                 }
                 self.pop(&[0x58]); // rax = the block
             }
@@ -1155,7 +1245,7 @@ impl Generator<'_> {
                 }
                 self.bytes(&[0x48, 0x8b, 0x4c, 0x24, 16]); // block
                 self.bytes(&[0x48, 0x8b, 0x14, 0x24]); // index
-                self.bytes(&[0x48, 0x89, 0x44, 0xd1, 15]);
+                self.bytes(&[0x48, 0x89, 0x44, 0xd1, DYN_DATA]);
                 self.bytes(&[0x48, 0xff, 0x04, 0x24, 0x48, 0x81, 0x3c, 0x24]);
                 self.dword(*count as u32);
                 let again = self.jump(Some(0x82));
@@ -2055,26 +2145,32 @@ impl Generator<'_> {
         self.bytes(&[0x48, 0x83, 0xc4, 0x20]);
         self.bytes(&[0x5b]); // pop rbx
         self.bytes(&[0xc3]);
-        // Dynamic arrays: a tagged pointer to [rc][len][elements..]. Push
-        // allocates a fresh block; element writes reuse unique blocks and
-        // detach shared ones, preserving value semantics.
+        // Dynamic arrays: [rc][len][capacity][elements..]. Unique arrays
+        // reuse capacity; shared arrays detach before mutation.
         self.rt_dnew = self.code.len();
-        // One allocation is bounded to 1,048,576 elements (8 MiB payload).
-        // A saved nonvolatile register keeps the count across HeapAlloc.
-        self.bytes(&[0x53, 0x48, 0x83, 0xec, 0x20]);
+        // count and capacity survive the allocator in saved registers.
+        self.bytes(&[0x53, 0x41, 0x54, 0x48, 0x83, 0xec, 0x28]);
         self.bytes(&[0x48, 0x89, 0xcb, 0x48, 0x81, 0xf9]);
-        self.dword(1_048_576);
+        self.dword(MAX_DYN_ELEMENTS);
         let dnew_size_ok = self.jump(Some(0x86));
         self.bytes(&[0xb9]);
         self.dword(73);
         self.bytes(&[0x41, 0xff, 0x57, 0x10]);
         self.here(dnew_size_ok);
-        self.bytes(&[0x48, 0x8d, 0x0c, 0xdd, 0x10, 0, 0, 0]); // rcx = count*8+16
+        self.bytes(&[0x41, 0xbc, 1, 0, 0, 0]); // capacity = 1
+        let capacity = self.code.len();
+        self.bytes(&[0x49, 0x39, 0xdc]); // cmp r12, rbx
+        let capacity_done = self.jump(Some(0x83));
+        self.bytes(&[0x49, 0xd1, 0xe4]); // capacity *= 2
+        let capacity_again = self.jump(None);
+        self.patch(capacity_again, capacity);
+        self.here(capacity_done);
+        self.bytes(&[0x4c, 0x89, 0xe1, 0x48, 0xc1, 0xe1, 3, 0x48, 0x83, 0xc1, 24]);
         self.bytes(&[0xe8]);
         self.relative(self.rt_alloc);
         self.bytes(&[0x48, 0xc7, 0x00, 1, 0, 0, 0]);
-        self.bytes(&[0x48, 0x89, 0x58, 8, 0x48, 0xff, 0xc0]);
-        self.bytes(&[0x48, 0x83, 0xc4, 0x20, 0x5b, 0xc3]);
+        self.bytes(&[0x48, 0x89, 0x58, 8, 0x4c, 0x89, 0x60, 16, 0x48, 0xff, 0xc0]);
+        self.bytes(&[0x48, 0x83, 0xc4, 0x28, 0x41, 0x5c, 0x5b, 0xc3]);
         self.rt_dlen = self.code.len();
         self.bytes(&[0x48, 0x8b, 0x41, 7, 0xc3]);
         self.rt_didx = self.code.len();
@@ -2085,7 +2181,7 @@ impl Generator<'_> {
         self.dword(72);
         self.bytes(&[0x41, 0xff, 0x57, 0x10]);
         self.here(didx_ok);
-        self.bytes(&[0x48, 0x8b, 0x44, 0xd1, 15, 0xc3]);
+        self.bytes(&[0x48, 0x8b, 0x44, 0xd1, DYN_DATA, 0xc3]);
         self.rt_dfree_str = self.code.len();
         // rcx = untagged block. Saved registers survive nested releases.
         self.bytes(&[0x53, 0x41, 0x54, 0x48, 0x83, 0xec, 0x28]);
@@ -2093,7 +2189,7 @@ impl Generator<'_> {
         let dfree_loop = self.code.len();
         self.bytes(&[0x4d, 0x85, 0xe4]);
         let dfree_end = self.jump(Some(0x84));
-        self.bytes(&[0x4a, 0x8b, 0x4c, 0xe3, 8, 0xe8]);
+        self.bytes(&[0x4a, 0x8b, 0x4c, 0xe3, 16, 0xe8]);
         self.relative(self.rt_release);
         self.bytes(&[0x49, 0xff, 0xcc]); // dec r12 (not r12's 32-bit half)
         let dfree_again = self.jump(None);
@@ -2110,10 +2206,10 @@ impl Generator<'_> {
         self.relative(self.rt_dfree_str);
         self.here(drelease_live);
         self.bytes(&[0xc3]);
-        self.rt_push_plain = self.dynamic_mutation(false, false);
-        self.rt_push_str = self.dynamic_mutation(true, false);
-        self.rt_dset_plain = self.dynamic_mutation(false, true);
-        self.rt_dset_str = self.dynamic_mutation(true, true);
+        self.rt_push_plain = self.dynamic_push(false);
+        self.rt_push_str = self.dynamic_push(true);
+        self.rt_dset_plain = self.dynamic_set(false);
+        self.rt_dset_str = self.dynamic_set(true);
         self.printd = self.code.len();
         // Fixed-point decimal print for f64: "%f" with six fraction digits,
         // plus nan/inf spellings. RCX carries the bit pattern, like printi.
