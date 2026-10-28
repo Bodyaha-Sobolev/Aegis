@@ -1,0 +1,20 @@
+// The declaration and call both explicitly acknowledge the native ABI contract.
+// Windows MulDiv uses three 32-bit signed integers and returns i32.
+mod windows {
+    unsafe extern "kernel32.dll" fn mul_div(a: i32, b: i32, divisor: i32) -> i32 = "MulDiv";
+    unsafe extern "kernel32.dll" fn ticks() -> u64 = "GetTickCount64";
+}
+
+fn scaled(value: i32) -> i32 {
+    unsafe {
+        return windows::mul_div(value, 10, 3);
+    }
+}
+
+fn main() {
+    printi(scaled(9));  // 30
+    printi(scaled(-9)); // -30
+    unsafe {
+        printi(windows::ticks() > 0);
+    }
+}

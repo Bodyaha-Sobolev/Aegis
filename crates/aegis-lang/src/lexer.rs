@@ -4,6 +4,8 @@ use std::ops::Range;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Keyword {
     Fn,
+    Unsafe,
+    Extern,
     Struct,
     Mod,
     Use,
@@ -60,6 +62,8 @@ pub(crate) struct Token {
 fn keyword(word: &str) -> Option<Keyword> {
     Some(match word {
         "fn" => Keyword::Fn,
+        "unsafe" => Keyword::Unsafe,
+        "extern" => Keyword::Extern,
         "struct" => Keyword::Struct,
         "mod" => Keyword::Mod,
         "use" => Keyword::Use,

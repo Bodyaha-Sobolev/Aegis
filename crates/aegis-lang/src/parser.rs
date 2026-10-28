@@ -168,6 +168,7 @@ pub(crate) struct Function {
     pub params: Vec<Param>,
     pub result: Type,
     pub body: Vec<Stmt>,
+    pub external: Option<crate::ffi::External>,
     pub span: Range<usize>,
 }
 #[derive(Debug, Clone)]
@@ -185,7 +186,12 @@ impl From<&Function> for FunctionInfo {
             name: f.name.clone(),
             parameters: f.params.len(),
             signature: format!(
-                "{}({}) -> {}",
+                "{}{}({}) -> {}",
+                if f.external.is_some() {
+                    "unsafe extern "
+                } else {
+                    ""
+                },
                 f.name,
                 f.params
                     .iter()
@@ -213,6 +219,7 @@ pub(crate) enum StmtKind {
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
     Block(Vec<Stmt>),
+    Unsafe(Vec<Stmt>),
     Builtin(Keyword, Expr),
     Break,
     Continue,
@@ -338,6 +345,15 @@ impl Parser<'_> {
         } else {
             Err(self.error(format!("expected '{symbol}'")))
         }
+    }
+    fn string(&mut self) -> Result<String, Diagnostic> {
+        if self.token().kind != Kind::String {
+            return Err(self.error("expected string literal"));
+        }
+        let (_, value) = crate::strings::literal(&self.source[self.token().span.clone()]);
+        let value = value.map_err(|message| self.error(message))?;
+        self.at += 1;
+        Ok(value)
     }
     fn name(&mut self) -> Result<String, Diagnostic> {
         if self.token().kind != Kind::Ident {
@@ -666,7 +682,16 @@ impl Parser<'_> {
                 continue;
             }
             let start = self.at;
-            let kind = if self.kw(Keyword::Fn) {
+            let kind = if self.kw(Keyword::Unsafe) {
+                if !self.kw(Keyword::Extern) {
+                    return Err(self.error("expected extern after unsafe at module scope"));
+                }
+                self.string()?;
+                if !self.kw(Keyword::Fn) {
+                    return Err(self.error("expected fn in external declaration"));
+                }
+                Keyword::Extern
+            } else if self.kw(Keyword::Fn) {
                 Keyword::Fn
             } else if self.kw(Keyword::Struct) {
                 Keyword::Struct
@@ -694,23 +719,33 @@ impl Parser<'_> {
                 if self.function_names.len() > 256 {
                     return Err(self.error("function limit exceeded"));
                 }
-                while self.token().kind != Kind::Sym("{") {
-                    if matches!(self.token().kind, Kind::Eof | Kind::Sym("}")) {
-                        return Err(self.error("expected '{' for function body"));
+                let terminator = if kind == Keyword::Extern { ";" } else { "{" };
+                while self.token().kind != Kind::Sym(terminator) {
+                    if matches!(
+                        self.token().kind,
+                        Kind::Eof | Kind::Sym("}") | Kind::Sym("{")
+                    ) {
+                        return Err(
+                            self.error(format!("expected '{terminator}' for function declaration"))
+                        );
                     }
                     self.at += 1;
                 }
             }
-            self.expect("{")?;
-            let mut braces = 1usize;
-            while braces != 0 {
-                match self.token().kind {
-                    Kind::Eof => return Err(self.error("expected '}' before end of file")),
-                    Kind::Sym("{") => braces += 1,
-                    Kind::Sym("}") => braces -= 1,
-                    _ => {}
+            if kind == Keyword::Extern {
+                self.expect(";")?;
+            } else {
+                self.expect("{")?;
+                let mut braces = 1usize;
+                while braces != 0 {
+                    match self.token().kind {
+                        Kind::Eof => return Err(self.error("expected '}' before end of file")),
+                        Kind::Sym("{") => braces += 1,
+                        Kind::Sym("}") => braces -= 1,
+                        _ => {}
+                    }
+                    self.at += 1;
                 }
-                self.at += 1;
             }
             self.items.push(Item {
                 kind,
@@ -731,12 +766,20 @@ impl Parser<'_> {
         }
         let mut functions: Vec<Function> = Vec::new();
         for item in self.items.clone() {
-            if item.kind != Keyword::Fn {
+            if !matches!(item.kind, Keyword::Fn | Keyword::Extern) {
                 continue;
             }
             self.at = item.start;
             self.module = item.module;
             let start = self.token().span.start;
+            let library = if item.kind == Keyword::Extern {
+                self.kw(Keyword::Unsafe);
+                self.kw(Keyword::Extern);
+                let span = self.token().span.clone();
+                Some((self.string()?, span))
+            } else {
+                None
+            };
             self.kw(Keyword::Fn);
             self.name()?;
             let name = item.name;
@@ -750,6 +793,8 @@ impl Parser<'_> {
                     }
                     let ty = if self.sym(":") {
                         self.type_name()?
+                    } else if library.is_some() {
+                        return Err(self.error("external parameters require explicit scalar types"));
                     } else {
                         Type::I64
                     };
@@ -765,10 +810,54 @@ impl Parser<'_> {
             }
             let result = if self.sym("->") {
                 self.type_name()?
+            } else if library.is_some() {
+                return Err(self.error("external result requires an explicit scalar type"));
             } else {
                 Type::I64
             };
-            let body = self.block()?;
+            let external = if let Some((library, library_span)) = library {
+                if params
+                    .iter()
+                    .any(|p| !(p.ty.integer() || p.ty.float() || p.ty == Type::Bool))
+                    || !(result.integer() || result.float() || result == Type::Bool)
+                {
+                    return Err(
+                        self.error("external signatures support only numeric scalars and bool")
+                    );
+                }
+                self.expect("=")?;
+                let symbol_span = self.token().span.clone();
+                let symbol = self.string()?;
+                self.expect(";")?;
+                let external = crate::ffi::External::new(library, symbol).map_err(|message| {
+                    Diagnostic::new(
+                        self.source,
+                        if message.starts_with("external symbol") {
+                            symbol_span
+                        } else {
+                            library_span
+                        },
+                        message,
+                    )
+                })?;
+                if functions.iter().filter(|f| f.external.is_some()).count()
+                    >= crate::ffi::MAX_EXTERNALS
+                {
+                    return Err(Diagnostic::new(
+                        self.source,
+                        start..self.tokens[self.at - 1].span.end,
+                        "external function limit exceeded (64)",
+                    ));
+                }
+                Some(external)
+            } else {
+                None
+            };
+            let body = if external.is_some() {
+                Vec::new()
+            } else {
+                self.block()?
+            };
             if self.at != item.end {
                 return Err(self.error("unexpected tokens after function body"));
             }
@@ -777,6 +866,7 @@ impl Parser<'_> {
                 params,
                 result,
                 body,
+                external,
                 span: start..self.tokens[self.at - 1].span.end,
             });
             if functions.len() > 256 {
@@ -785,6 +875,7 @@ impl Parser<'_> {
         }
         match functions.iter().find(|f| f.name == "main") {
             None => return Err(self.error("fn main() is required")),
+            Some(f) if f.external.is_some() => return Err(self.error("main cannot be external")),
             Some(f) if !f.params.is_empty() => {
                 return Err(self.error("main must have no parameters"));
             }
@@ -849,6 +940,8 @@ impl Parser<'_> {
             StmtKind::Break
         } else if self.kw(Keyword::Continue) {
             StmtKind::Continue
+        } else if self.kw(Keyword::Unsafe) {
+            StmtKind::Unsafe(self.block()?)
         } else if self.token().kind == Kind::Sym("{") {
             StmtKind::Block(self.block()?)
         } else if let Kind::Keyword(

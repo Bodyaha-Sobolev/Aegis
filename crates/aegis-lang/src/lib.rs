@@ -4,6 +4,7 @@
 pub mod codec;
 mod codegen;
 pub mod disasm;
+mod ffi;
 mod lexer;
 mod parser;
 pub mod pe;

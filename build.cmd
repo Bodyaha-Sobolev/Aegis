@@ -19,6 +19,8 @@ if /I "%~1"=="test" (
     if errorlevel 1 goto failed
     %AEGIS_PYTHON% tools\test_windows_abi.py
     if errorlevel 1 goto failed
+    %AEGIS_PYTHON% tools\test_ffi.py
+    if errorlevel 1 goto failed
     popd
     exit /b 0
 )

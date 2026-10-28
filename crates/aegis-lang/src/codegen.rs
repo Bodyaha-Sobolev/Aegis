@@ -29,6 +29,19 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
     let mut g = Generator {
         source,
         code: Vec::new(),
+        external_functions: program
+            .functions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, f)| f.external.as_ref().map(|external| (index, external)))
+            .enumerate()
+            .map(|(slot, (index, external))| {
+                (
+                    index,
+                    (crate::ffi::SLOT_BASE - 0x40 + slot * 8, external.clone()),
+                )
+            })
+            .collect(),
         functions: program
             .functions
             .iter()
@@ -84,6 +97,10 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
     let main_patch = g.runtime();
     for (index, function) in program.functions.iter().enumerate() {
         g.offsets[index] = g.code.len();
+        if let Some((slot, external)) = g.external_functions.get(&index).cloned() {
+            g.external_thunk(slot, &external);
+            continue;
+        }
         g.vars.clear();
         g.aggregate_result = function.result.aggregate();
         g.slots = usize::from(g.aggregate_result);
@@ -192,6 +209,9 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
     if g.code.len() > MAX_CODE {
         return Err(g.error(&(0..0), "native code limit exceeded (64 KiB)"));
     }
+    if g.data.len() > MAX_DATA {
+        return Err(g.error(&(0..0), "read-only data limit exceeded (2 MiB)"));
+    }
     let size = g.code.len();
     Ok((emit_pe(&g.code, &g.data), size))
 }
@@ -205,6 +225,7 @@ struct Generator<'a> {
     source: &'a str,
     code: Vec<u8>,
     functions: HashMap<String, (usize, usize)>,
+    external_functions: HashMap<usize, (usize, crate::ffi::External)>,
     offsets: Vec<usize>,
     calls: Vec<(usize, usize)>,
     vars: Vec<(String, usize, Type)>,
@@ -414,6 +435,141 @@ impl Generator<'_> {
         self.bytes(&[0x48, 0x83, 0xc4, 0x20]);
         self.bytes(&[0x5e, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3]);
         entry
+    }
+    fn external_thunk(&mut self, slot: usize, external: &crate::ffi::External) {
+        self.data.resize(self.data.len().next_multiple_of(8), 0);
+        let library = self.data.len();
+        for unit in external.library.encode_utf16().chain(std::iter::once(0)) {
+            self.data.extend_from_slice(&unit.to_le_bytes());
+        }
+        let symbol = self.data.len();
+        self.data.extend_from_slice(external.symbol.as_bytes());
+        self.data.push(0);
+        // A resolved function is a tail call, preserving the original stack
+        // arguments and shadow area. No library code runs before its first call.
+        self.bytes(&[0x49, 0x8b, 0x87]);
+        self.dword(slot as u32);
+        self.bytes(&[0x48, 0x85, 0xc0]);
+        let resolved = self.jump(Some(0x85));
+        // Save every register argument before the resolver uses volatile regs.
+        // Two saved nonvolatile registers and 104 local bytes align the call
+        // frame: 32 shadow + 64 saved arguments + 8 padding.
+        self.bytes(&[0x53, 0x41, 0x54, 0x48, 0x83, 0xec, 104]);
+        for (index, opcode) in [
+            [0x48, 0x89, 0x4c, 0x24],
+            [0x48, 0x89, 0x54, 0x24],
+            [0x4c, 0x89, 0x44, 0x24],
+            [0x4c, 0x89, 0x4c, 0x24],
+        ]
+        .iter()
+        .enumerate()
+        {
+            self.bytes(opcode);
+            self.bytes(&[(32 + index * 8) as u8]);
+            self.bytes(&[
+                0xf2,
+                0x0f,
+                0x11,
+                0x44 | ((index as u8) << 3),
+                0x24,
+                (64 + index * 8) as u8,
+            ]);
+        }
+        if external.flags == 0x800 {
+            // Build an absolute System32 path, so an already-loaded DLL with
+            // the same basename cannot redirect the bare-name request.
+            self.bytes(&[0xb9]);
+            self.dword(65536 + 16);
+            self.bytes(&[0xe8]);
+            self.relative(self.rt_alloc);
+            self.bytes(&[0x49, 0x89, 0xc4, 0x48, 0xc7, 0x00, 1, 0, 0, 0]);
+            self.bytes(&[0x49, 0x8d, 0x4c, 0x24, 16, 0xba]);
+            self.dword(32768);
+            self.bytes(&[0x41, 0xff, 0x57, 0x40, 0x89, 0xc0, 0x85, 0xc0]);
+            let directory_failed = self.jump(Some(0x84));
+            self.bytes(&[0x3d]);
+            self.dword((32768 - external.library.len() - 2) as u32);
+            let directory_ok = self.jump(Some(0x86));
+            self.here(directory_failed);
+            self.bytes(&[0xb9]);
+            self.dword(75);
+            self.bytes(&[0x41, 0xff, 0x57, 0x10]);
+            self.here(directory_ok);
+            // Append a separator unless the system directory is a drive root.
+            self.bytes(&[0x66, 0x41, 0x83, 0x7c, 0x44, 14, 0x5c]);
+            let separator = self.jump(Some(0x84));
+            self.bytes(&[0x66, 0x41, 0xc7, 0x44, 0x44, 16, 0x5c, 0, 0xff, 0xc0]);
+            self.here(separator);
+            self.bytes(&[0x49, 0x8d, 0x4c, 0x44, 16]);
+            self.data_ref(&[0x48, 0x8d, 0x15], library);
+            let copy = self.code.len();
+            self.bytes(&[0x44, 0x0f, 0xb7, 0x02, 0x66, 0x44, 0x89, 0x01]);
+            self.bytes(&[0x48, 0x83, 0xc2, 2, 0x48, 0x83, 0xc1, 2, 0x45, 0x85, 0xc0]);
+            let more = self.jump(Some(0x85));
+            self.patch(more, copy);
+            self.bytes(&[0x49, 0x8d, 0x4c, 0x24, 16]);
+        } else {
+            self.data_ref(&[0x48, 0x8d, 0x0d], library);
+        }
+        self.bytes(&[0x31, 0xd2, 0x41, 0xb8]);
+        self.dword(external.flags);
+        self.bytes(&[0x41, 0xff, 0x57, 0x30, 0x48, 0x89, 0xc3]);
+        if external.flags == 0x800 {
+            self.bytes(&[0x49, 0x8d, 0x4c, 0x24, 1, 0xe8]);
+            self.relative(self.rt_release); // temporary path block
+        }
+        self.bytes(&[0x48, 0x89, 0xd8, 0x48, 0x85, 0xc0]);
+        let module_ok = self.jump(Some(0x85));
+        self.bytes(&[0xb9]);
+        self.dword(75);
+        self.bytes(&[0x41, 0xff, 0x57, 0x10]);
+        self.here(module_ok);
+        self.bytes(&[0x48, 0x89, 0xc3, 0x48, 0x89, 0xc1]);
+        self.data_ref(&[0x48, 0x8d, 0x15], symbol);
+        self.bytes(&[0x41, 0xff, 0x57, 0x38, 0x48, 0x85, 0xc0]);
+        let symbol_ok = self.jump(Some(0x85));
+        self.bytes(&[0xb9]);
+        self.dword(75);
+        self.bytes(&[0x41, 0xff, 0x57, 0x10]);
+        self.here(symbol_ok);
+        self.bytes(&[0x49, 0x89, 0x87]);
+        self.dword(slot as u32);
+        for (index, opcode) in [
+            [0x48, 0x8b, 0x4c, 0x24],
+            [0x48, 0x8b, 0x54, 0x24],
+            [0x4c, 0x8b, 0x44, 0x24],
+            [0x4c, 0x8b, 0x4c, 0x24],
+        ]
+        .iter()
+        .enumerate()
+        {
+            self.bytes(opcode);
+            self.bytes(&[(32 + index * 8) as u8]);
+            self.bytes(&[
+                0xf2,
+                0x0f,
+                0x10,
+                0x44 | ((index as u8) << 3),
+                0x24,
+                (64 + index * 8) as u8,
+            ]);
+        }
+        self.bytes(&[0x48, 0x83, 0xc4, 104, 0x41, 0x5c, 0x5b]);
+        self.here(resolved);
+        self.bytes(&[0x41, 0xff, 0xa7]); // jmp [r15+slot]
+        self.dword(slot as u32);
+    }
+    fn function_call(&mut self, index: usize, result: &Type) {
+        self.bytes(&[0xe8]);
+        let at = self.hole();
+        self.calls.push((at, index));
+        if self.external_functions.contains_key(&index) {
+            if *result == Type::Bool {
+                self.bytes(&[0x84, 0xc0, 0x0f, 0x95, 0xc0, 0x48, 0x0f, 0xb6, 0xc0]);
+            } else {
+                self.canonical(result);
+            }
+        }
     }
     fn reserve_call(&mut self) -> u8 {
         let amount = if self.stack.is_multiple_of(2) { 32 } else { 40 };
@@ -1081,7 +1237,7 @@ impl Generator<'_> {
                 }
                 self.bytes(&[0xc9, 0xc3]);
             }
-            StmtKind::Block(body) => self.block(body)?,
+            StmtKind::Block(body) | StmtKind::Unsafe(body) => self.block(body)?,
             StmtKind::Builtin(kind, expr) => {
                 if matches!(kind, Keyword::Print | Keyword::Println) {
                     self.str_temp(expr)?;
@@ -1580,9 +1736,7 @@ impl Generator<'_> {
                         self.bytes(&[0x4c, 0x8d, 0x94, 0x24]);
                         self.dword((amount + (self.stack - result_stack) * 8) as u32);
                     }
-                    self.bytes(&[0xe8]);
-                    let at = self.hole();
-                    self.calls.push((at, index));
+                    self.function_call(index, &expr.ty);
                     // Argument snapshots keep their string references until
                     // the call returns; release them before the stack pop.
                     // The result is saved first: rt_release clobbers rax.
@@ -1631,9 +1785,7 @@ impl Generator<'_> {
                     }
                 }
                 let amount = self.reserve_call();
-                self.bytes(&[0xe8]);
-                let at = self.hole();
-                self.calls.push((at, index));
+                self.function_call(index, &expr.ty);
                 self.release_call(amount);
             }
             ExprKind::Binary(op, left, right) if *op == "&&" || *op == "||" => {
@@ -2613,7 +2765,7 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
     dword(&mut b, o + 0x98, reloc_rva);
     dword(&mut b, o + 0x9c, 12);
     dword(&mut b, o + 0xd0, IMPORTS + 0x40);
-    dword(&mut b, o + 0xd4, 32);
+    dword(&mut b, o + 0xd4, 10 * 8);
     for (i, name, rva, raw, size, flags) in [
         (0, b".text\0\0\0", TEXT, 0x400, 0x10000, 0x60000020),
         (1, b".idata\0\0", IMPORTS, 0x10400, 0x400, 0xc0000040),
@@ -2660,29 +2812,33 @@ fn emit_pe(code: &[u8], data: &[u8]) -> Vec<u8> {
     dword(&mut b, reloc_raw + 4, 12);
     let i = 0x10400;
     dword(&mut b, i, IMPORTS + 0x40);
-    dword(&mut b, i + 12, IMPORTS + 0x80);
+    dword(&mut b, i + 12, IMPORTS + 0x90);
     dword(&mut b, i + 16, IMPORTS + 0x40);
-    // IAT order is fixed by the runtime: r15+0x00..0x28.
-    for (at, rva) in [
-        (0x40, 0x90),
-        (0x48, 0xa0),
-        (0x50, 0xb0),
-        (0x58, 0xc0),
-        (0x60, 0xd0),
-        (0x68, 0xe0),
-    ] {
-        qword(&mut b, i + at, (IMPORTS + rva) as u64);
+    b[i + 0x90..i + 0x9d].copy_from_slice(b"KERNEL32.DLL\0");
+    // Runtime slots retain their order; lazy external pointers occupy 0x200..0x400.
+    let mut name_at = 0xb0usize;
+    for (index, name) in [
+        "GetStdHandle",
+        "WriteFile",
+        "ExitProcess",
+        "GetProcessHeap",
+        "HeapAlloc",
+        "HeapFree",
+        "LoadLibraryExW",
+        "GetProcAddress",
+        "GetSystemDirectoryW",
+    ]
+    .iter()
+    .enumerate()
+    {
+        qword(
+            &mut b,
+            i + 0x40 + index * 8,
+            (IMPORTS + name_at as u32) as u64,
+        );
+        b[i + name_at + 2..i + name_at + 2 + name.len()].copy_from_slice(name.as_bytes());
+        name_at = (name_at + 2 + name.len() + 1).next_multiple_of(2);
     }
-    for (at, text) in [
-        (0x80, &b"KERNEL32.DLL\0"[..]),
-        (0x92, &b"GetStdHandle\0"[..]),
-        (0xa2, &b"WriteFile\0"[..]),
-        (0xb2, &b"ExitProcess\0"[..]),
-        (0xc2, &b"GetProcessHeap\0"[..]),
-        (0xd2, &b"HeapAlloc\0"[..]),
-        (0xe2, &b"HeapFree\0"[..]),
-    ] {
-        b[i + at..i + at + text.len()].copy_from_slice(text);
-    }
+    debug_assert!(name_at <= crate::ffi::SLOT_BASE);
     b
 }

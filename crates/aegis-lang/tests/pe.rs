@@ -26,7 +26,10 @@ fn inspects_native_compiler_output_without_mutating_it() {
             Symbol::Name("ExitProcess".into()),
             Symbol::Name("GetProcessHeap".into()),
             Symbol::Name("HeapAlloc".into()),
-            Symbol::Name("HeapFree".into())
+            Symbol::Name("HeapFree".into()),
+            Symbol::Name("LoadLibraryExW".into()),
+            Symbol::Name("GetProcAddress".into()),
+            Symbol::Name("GetSystemDirectoryW".into())
         ]
     );
 }

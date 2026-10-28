@@ -24,12 +24,23 @@ pub(crate) fn check(source: &str, program: &mut Program) -> Result<(), Diagnosti
     let mut checker = Checker {
         source,
         signatures,
+        externals: program
+            .functions
+            .iter()
+            .filter(|f| f.external.is_some())
+            .map(|f| f.name.clone())
+            .collect(),
+        unsafe_depth: 0,
         vars: Vec::new(),
         result: Type::I64,
         negate_literal: false,
     };
     for function in &mut program.functions {
+        if function.external.is_some() {
+            continue;
+        }
         checker.vars.clear();
+        checker.unsafe_depth = 0;
         checker.result = function.result.clone();
         for param in &function.params {
             if checker.vars.iter().map(|(_, t)| t.slots()).sum::<usize>() + param.ty.slots() > 256 {
@@ -54,7 +65,7 @@ pub(crate) fn check(source: &str, program: &mut Program) -> Result<(), Diagnosti
 fn returns(body: &[Stmt]) -> bool {
     body.iter().any(|stmt| match &stmt.kind {
         StmtKind::Return(_) => true,
-        StmtKind::Block(body) => returns(body),
+        StmtKind::Block(body) | StmtKind::Unsafe(body) => returns(body),
         StmtKind::If(_, yes, no) => returns(yes) && returns(no),
         _ => false,
     })
@@ -62,6 +73,8 @@ fn returns(body: &[Stmt]) -> bool {
 struct Checker<'a> {
     source: &'a str,
     signatures: HashMap<String, (Vec<Type>, Type)>,
+    externals: std::collections::HashSet<String>,
+    unsafe_depth: usize,
     vars: Vec<(String, Type)>,
     result: Type,
     // Set by unary minus so its immediate literal may reach the type minimum.
@@ -142,6 +155,12 @@ impl Checker<'_> {
                     self.block(body)?;
                 }
                 StmtKind::Block(body) => self.block(body)?,
+                StmtKind::Unsafe(body) => {
+                    self.unsafe_depth += 1;
+                    let result = self.block(body);
+                    self.unsafe_depth -= 1;
+                    result?;
+                }
                 StmtKind::Break | StmtKind::Continue => {}
             }
         }
@@ -451,6 +470,12 @@ impl Checker<'_> {
                 ty.clone()
             }
             ExprKind::Call(name, args) => {
+                if self.externals.contains(name) && self.unsafe_depth == 0 {
+                    return Err(self.error(
+                        &expr.span,
+                        "external calls require an explicit unsafe block",
+                    ));
+                }
                 let Some((params, result)) = self.signatures.get(name).cloned() else {
                     return Err(self.error(&expr.span, format!("undefined function: {name}")));
                 };
