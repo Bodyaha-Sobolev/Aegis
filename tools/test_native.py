@@ -667,6 +667,10 @@ def main():
         ('dyn_grow_string_field', 'struct Bag { items: [str] } fn main() { let b = Bag { items: [] }; let i = 0; while(i < 1000) { b.items = push(b.items, "s" + "!"); i = i + 1; } let copy = b; b.items = push(b.items, b.items[0]); println(b.items[1000]); println(copy.items[999]); printi(len(copy.items)); }', b's!\ns!\n1000\n', 0),
         ('dyn_grow_fixed_slot_general', 'fn pick() -> i64 { printi(7); return 0; } fn main() { let x: [i64] = [1]; let a = [x]; a[pick()] = push(a[pick()], 2); printi(a[0][1]); printi(len(x)); }', b'7\n7\n2\n1\n', 0),
         ('dyn_grow_snapshot_per_iteration', 'fn main() { let a: [str] = []; let last: [str] = []; let i = 0; while(i < 1000) { last = a; a = push(a, "x" + "y"); i = i + 1; } printi(len(last)); printi(len(a)); println(last[998]); println(a[999]); }', b'999\n1000\nxy\nxy\n', 0),
+        ('abi_default_f32_after_value', 'fn zero() -> f32 {} fn keep(x:f32) -> f32 { return x; } fn main() { let x = keep(7.25); printi(zero()); printi(x); }', b'0.000000\n7.250000\n', 0),
+        ('abi_mixed_owned_arguments', 'fn mix(a:str,b:f64,c:[str],d:f32,e:i8)->f64 { println(a); println(c[0]); return b+f64(d)+f64(e); } fn main() { let values:[str] = ["array"+"!"]; printi(mix("text"+"!",2.5,values,f32(1.25),-2)); println(values[0]); }', b'text!\narray!\n1.750000\narray!\n', 0),
+        ('abi_mixed_aggregate_return', 'struct Box { label:str, x:f64 } fn make(a:i64,b:f64,c:i64,d:f32,e:str)->Box { return Box { label:e, x:f64(a)+b+f64(c)+f64(d) }; } fn main() { let b = make(1,2.5,3,f32(4.25),"box"+"!"); println(b.label); printi(b.x); }', b'box!\n10.750000\n', 0),
+        ('abi_mixed_aggregate_argument', 'struct Box { first:str, second:[str], x:f64 } fn sum(a:Box,b:f64,c:i64,d:f32,e:Box)->f64 { println(a.first); println(e.second[0]); return a.x+b+f64(c)+f64(d)+e.x; } fn main() { let a = Box { first:"one"+"!",second:["two"+"!"],x:1.25 }; printi(sum(a,2.5,3,f32(4.25),a)); println(a.second[0]); }', b'one!\ntwo!\n12.250000\ntwo!\n', 0),
     ])
     errors.extend([
         ('dyn_nested_element', 'fn main() { let a: [[i64]] = []; }', b'must be one-slot scalars or str'),

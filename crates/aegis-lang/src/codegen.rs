@@ -97,10 +97,8 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
             g.bytes(&[0x4c, 0x89, 0x95]);
             g.dword((-8i32) as u32);
         }
-        // Win64 assigns the first four slots per type: doubles consume
-        // XMM0-3, everything else consumes RCX/RDX/R8/R9, both positionally.
-        let mut gp = 0usize;
-        let mut xmm = 0usize;
+        // Each of the first four positions selects either its GP register
+        // (RCX/RDX/R8/R9) or XMM0/1/2/3 according to the parameter type.
         for (i, param) in function.params.iter().enumerate() {
             let slot = g.declare(&param.name, param.ty.clone(), &function.span)?;
             if i >= 4 {
@@ -112,8 +110,7 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
                 continue;
             }
             if param.ty.float() {
-                g.bytes(&[0xf2, 0x0f, 0x11, 0x85 | ((xmm as u8) << 3)]);
-                xmm += 1;
+                g.bytes(&[0xf2, 0x0f, 0x11, 0x85 | ((i as u8) << 3)]);
             } else {
                 g.bytes(
                     &[
@@ -121,9 +118,8 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
                         [0x48, 0x89, 0x95],
                         [0x4c, 0x89, 0x85],
                         [0x4c, 0x89, 0x8d],
-                    ][gp],
+                    ][i],
                 );
-                gp += 1;
             }
             g.dword((-(8 * (slot as i32 + 1))) as u32);
         }
@@ -147,6 +143,20 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
                 }
             }
         }
+        // External callers may leave upper GP/stack-slot bits unspecified for
+        // narrow arguments. All incoming registers have already been saved.
+        for param in &function.params {
+            if param.ty.narrow() || param.ty == Type::Bool {
+                let slot = g.variable(&param.name, &function.span)?;
+                g.local(0x8b, slot);
+                if param.ty == Type::Bool {
+                    g.bytes(&[0x84, 0xc0, 0x0f, 0x95, 0xc0, 0x48, 0x0f, 0xb6, 0xc0]);
+                } else {
+                    g.canonical(&param.ty);
+                }
+                g.local(0x89, slot);
+            }
+        }
         g.block(&function.body)?;
         g.release_scope(0);
         // Win64 calls require 16-byte stack alignment. Slots from disjoint
@@ -164,7 +174,7 @@ pub(crate) fn generate(source: &str, program: &Program) -> Result<(Vec<u8>, usiz
             g.bytes(&[0xe8]);
             g.relative(g.rt_dnew);
             g.release_call(amount);
-        } else if function.result == Type::F64 {
+        } else if function.result.float() {
             g.bytes(&[0x66, 0x0f, 0xef, 0xc0]); // pxor xmm0, xmm0
         } else {
             g.bytes(&[0x31, 0xc0]);
@@ -1504,22 +1514,12 @@ impl Generator<'_> {
                 let result_stack = self.stack;
                 let mut locations = Vec::with_capacity(args.len());
                 let aggregates = args.iter().any(|arg| arg.ty.aggregate());
-                // Plan the first four register assignments with per-type
-                // counters, exactly like the callee expects them.
-                let mut plan: Vec<(bool, usize)> = Vec::new();
-                {
-                    let mut gp = 0usize;
-                    let mut xmm = 0usize;
-                    for arg in args.iter().take(4) {
-                        if arg.ty.float() {
-                            plan.push((true, xmm));
-                            xmm += 1;
-                        } else {
-                            plan.push((false, gp));
-                            gp += 1;
-                        }
-                    }
-                }
+                let plan: Vec<(bool, usize)> = args
+                    .iter()
+                    .take(4)
+                    .enumerate()
+                    .map(|(position, arg)| (arg.ty.float(), position))
+                    .collect();
                 for arg in args {
                     if arg.ty.aggregate() {
                         self.snapshot(arg)?;
