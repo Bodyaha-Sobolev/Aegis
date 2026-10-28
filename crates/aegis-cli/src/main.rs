@@ -7,7 +7,13 @@ use std::{
 use zeroize::Zeroizing;
 
 fn main() {
-    if let Err(error) = execute(std::env::args_os().skip(1).collect()) {
+    // Recursive descent over the documented depth limits needs more stack
+    // than the default main thread provides, especially in debug builds.
+    let worker = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| execute(std::env::args_os().skip(1).collect()))
+        .expect("compiler thread");
+    if let Err(error) = worker.join().expect("compiler thread result") {
         eprintln!("{error}");
         std::process::exit(2);
     }

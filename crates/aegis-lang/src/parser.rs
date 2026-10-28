@@ -23,6 +23,7 @@ pub(crate) enum Type {
     Bool,
     Str,
     Array(Arc<Type>, usize),
+    Dyn(Arc<Type>),
     Record(Arc<Record>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,14 @@ impl Type {
     pub fn aggregate(&self) -> bool {
         matches!(self, Self::Array(..) | Self::Record(_))
     }
+    // Dynamic arrays are one-slot owned pointers with heap-side elements.
+    pub fn dyn_array(&self) -> bool {
+        matches!(self, Self::Dyn(_))
+    }
+    // Values whose move semantics match str: heap-backed owned pointers.
+    pub fn owned(&self) -> bool {
+        matches!(self, Self::Str | Self::Dyn(_))
+    }
     pub fn array(element: Self, len: usize) -> Option<Self> {
         if !(1..=256).contains(&len)
             || element.slots().checked_mul(len)? > 256
@@ -46,10 +55,9 @@ impl Type {
         Some(Self::Array(Arc::new(element), len))
     }
     pub fn element(&self) -> Option<Self> {
-        if let Self::Array(element, _) = self {
-            Some((**element).clone())
-        } else {
-            None
+        match self {
+            Self::Array(element, _) | Self::Dyn(element) => Some((**element).clone()),
+            _ => None,
         }
     }
     pub fn len(&self) -> Option<usize> {
@@ -124,6 +132,9 @@ impl std::fmt::Display for Type {
         if let Self::Array(_, len) = self {
             return write!(f, "[{}; {len}]", self.element().expect("array element"));
         }
+        if let Self::Dyn(element) = self {
+            return write!(f, "[{element}]");
+        }
         f.write_str(match self {
             Self::I64 => "i64",
             Self::U64 => "u64",
@@ -137,7 +148,7 @@ impl std::fmt::Display for Type {
             Self::F32 => "f32",
             Self::Bool => "bool",
             Self::Str => "str",
-            Self::Array(..) | Self::Record(_) => unreachable!(),
+            Self::Array(..) | Self::Dyn(_) | Self::Record(_) => unreachable!(),
         })
     }
 }
@@ -225,6 +236,7 @@ pub(crate) enum ExprKind {
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Len(Box<Expr>),
+    Push(Box<Expr>, Box<Expr>),
     Cast(Type, Box<Expr>),
     Var(String),
     Call(String, Vec<Expr>),
@@ -235,6 +247,7 @@ pub(crate) enum ExprKind {
 pub(crate) fn is_place(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Var(_) => true,
+        ExprKind::Index(base, _) if base.ty.dyn_array() => false,
         ExprKind::Field(base, _) | ExprKind::Index(base, _) => is_place(base),
         _ => false,
     }
@@ -456,6 +469,14 @@ impl Parser<'_> {
     fn parse_type(&mut self) -> Result<Type, Diagnostic> {
         if self.sym("[") {
             let element = self.type_name()?;
+            if self.sym("]") {
+                if element.aggregate() || element.dyn_array() {
+                    return Err(
+                        self.error("dynamic array elements must be one-slot scalars or str")
+                    );
+                }
+                return Ok(Type::Dyn(Arc::new(element)));
+            }
             self.expect(";")?;
             let Kind::Number(len @ 1..=256) = self.token().kind else {
                 return Err(self.error("array length must be a literal from 1 to 256"));
@@ -960,11 +981,12 @@ impl Parser<'_> {
                     let first = self.expr(1)?;
                     if self.sym(";") {
                         let Kind::Number(count) = self.token().kind else {
-                            return Err(self
-                                .error("array repeat length must be an integer literal (1..256)"));
+                            return Err(self.error(
+                                "array repeat length must be an integer literal (1..1048576)",
+                            ));
                         };
-                        if !(1..=256).contains(&count) {
-                            return Err(self.error("array repeat length must be in 1..256"));
+                        if !(1..=1_048_576).contains(&count) {
+                            return Err(self.error("array repeat length must be in 1..1048576"));
                         }
                         self.at += 1;
                         self.expect("]")?;
@@ -993,6 +1015,15 @@ impl Parser<'_> {
                 let value = self.expr(1)?;
                 self.expect(")")?;
                 ExprKind::Len(Box::new(value))
+            }
+            Kind::Keyword(Keyword::Push) => {
+                self.at += 1;
+                self.expect("(")?;
+                let array = self.expr(1)?;
+                self.expect(",")?;
+                let value = self.expr(1)?;
+                self.expect(")")?;
+                ExprKind::Push(Box::new(array), Box::new(value))
             }
             Kind::Number(n) => {
                 self.at += 1;
@@ -1097,6 +1128,7 @@ impl Parser<'_> {
             | ExprKind::Cast(_, e)
             | ExprKind::Len(e)
             | ExprKind::Repeat(e, _) => e.depth + 1,
+            ExprKind::Push(a, v) => a.depth.max(v.depth) + 1,
             ExprKind::Field(e, _) => e.depth + 1,
             ExprKind::Record(_, fields) => {
                 fields.iter().map(|(_, e)| e.depth).max().unwrap_or(0) + 1

@@ -4,6 +4,7 @@ use crate::{
     lexer::Keyword,
     parser::{Expr, ExprKind, Program, Stmt, StmtKind, Type, is_place},
 };
+use std::sync::Arc;
 use std::{collections::HashMap, ops::Range};
 
 pub(crate) fn check(source: &str, program: &mut Program) -> Result<(), Diagnostic> {
@@ -105,6 +106,12 @@ impl Checker<'_> {
                     {
                         return Err(self.error(&target.span, "string bytes are immutable"));
                     }
+                    if let ExprKind::Index(base, _) = &target.kind
+                        && base.ty.dyn_array()
+                        && !is_place(base)
+                    {
+                        return Err(self.error(&base.span, "assignment requires a named array"));
+                    }
                     self.aggregate_value(value, Some(ty))?;
                 }
                 StmtKind::Return(value) => {
@@ -192,12 +199,22 @@ impl Checker<'_> {
             }
             let element =
                 self.aggregate_value(value, expected.as_ref().and_then(|ty| ty.element()))?;
-            let ty = Type::array(element, *count).ok_or_else(|| {
-                self.error(
-                    &expr.span,
-                    "array layout limit exceeded (256 slots or 32 levels)",
-                )
-            })?;
+            let ty = if matches!(expected.as_ref(), Some(Type::Dyn(_))) {
+                if element.aggregate() || element.dyn_array() {
+                    return Err(self.error(
+                        &expr.span,
+                        "dynamic array elements must be one-slot scalars or str",
+                    ));
+                }
+                Type::Dyn(Arc::new(element))
+            } else {
+                Type::array(element, *count).ok_or_else(|| {
+                    self.error(
+                        &expr.span,
+                        "array layout limit exceeded (256 slots or 32 levels)",
+                    )
+                })?
+            };
             if let Some(expected) = expected.as_ref()
                 && *expected != ty
             {
@@ -210,7 +227,7 @@ impl Checker<'_> {
             return Ok(ty);
         }
         if let ExprKind::Array(values) = &mut expr.kind {
-            if values.is_empty() {
+            if values.is_empty() && !matches!(expected.as_ref(), Some(Type::Dyn(_))) {
                 return Err(self.error(&expr.span, "empty arrays are not supported yet"));
             }
             if let Some(expected) = expected.as_ref()
@@ -218,6 +235,7 @@ impl Checker<'_> {
             {
                 return Err(self.error(&expr.span, "type mismatch: expected scalar, found array"));
             }
+            let dyn_context = matches!(expected.as_ref(), Some(Type::Dyn(_)));
             let element = expected
                 .as_ref()
                 .and_then(|ty| ty.element())
@@ -230,12 +248,22 @@ impl Checker<'_> {
             for value in values.iter_mut() {
                 self.aggregate_value(value, Some(element.clone()))?;
             }
-            let ty = Type::array(element, values.len()).ok_or_else(|| {
-                self.error(
-                    &expr.span,
-                    "array layout limit exceeded (256 slots or 32 levels)",
-                )
-            })?;
+            let ty = if dyn_context {
+                if element.aggregate() || element.dyn_array() {
+                    return Err(self.error(
+                        &expr.span,
+                        "dynamic array elements must be one-slot scalars or str",
+                    ));
+                }
+                Type::Dyn(Arc::new(element))
+            } else {
+                Type::array(element, values.len()).ok_or_else(|| {
+                    self.error(
+                        &expr.span,
+                        "array layout limit exceeded (256 slots or 32 levels)",
+                    )
+                })?
+            };
             if let Some(expected) = expected.as_ref()
                 && *expected != ty
             {
@@ -286,6 +314,10 @@ impl Checker<'_> {
                 other => other.and_then(|ty| ty.element()),
             },
             ExprKind::Len(_) => Some(Type::I64),
+            ExprKind::Push(array, _) => match self.hint(array) {
+                Some(Type::Dyn(element)) => Some(Type::Dyn(element)),
+                _ => None,
+            },
             ExprKind::Var(name) => self
                 .vars
                 .iter()
@@ -373,17 +405,31 @@ impl Checker<'_> {
             }
             ExprKind::Len(value) => {
                 let ty = self.expr(value, None)?;
-                if ty != Type::Str && (ty.element().is_none() || !is_place(value)) {
+                if ty.dyn_array() {
+                    Type::I64
+                } else if ty != Type::Str && (ty.element().is_none() || !is_place(value)) {
                     return Err(self.error(&value.span, "len requires a string or named array"));
+                } else {
+                    Type::I64
                 }
-                Type::I64
+            }
+            ExprKind::Push(array, value) => {
+                let ty = self.expr(array, None)?;
+                let Some(element) = ty.element() else {
+                    return Err(self.error(&array.span, "push requires a dynamic array"));
+                };
+                if !ty.dyn_array() {
+                    return Err(self.error(&array.span, "push requires a dynamic array"));
+                }
+                self.aggregate_value(value, Some(element.clone()))?;
+                ty
             }
             ExprKind::Index(target, index) => {
                 let ty = self.expr(target, None)?;
                 let element = if ty == Type::Str {
                     Type::U64
                 } else {
-                    if !is_place(target) {
+                    if !ty.dyn_array() && !is_place(target) {
                         return Err(
                             self.error(&target.span, "indexing requires a named array or string")
                         );

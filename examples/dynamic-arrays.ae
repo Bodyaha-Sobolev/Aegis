@@ -1,0 +1,30 @@
+// Heap-backed arrays preserve value semantics, including strings and fields.
+struct Scores {
+    values: [i64],
+    label: str,
+}
+
+fn squares(count: i64) -> [i64] {
+    let result: [i64] = [];
+    let i = 0;
+    while (i < count) {
+        result = push(result, i * i);
+        i = i + 1;
+    }
+    return result;
+}
+
+fn main() {
+    let scores = Scores { values: squares(8), label: "Squares" };
+    let original = scores;
+    scores.values[2] = 99;
+    println(scores.label);
+    printi(scores.values[2]);   // 99
+    printi(original.values[2]); // 4
+
+    let messages: [str] = ["Hello" + "!"; 3];
+    let more = push(messages, "Aegis");
+    println(more[3]);
+    printi(len(messages));     // 3
+    printi(len(more));         // 4
+}

@@ -35,6 +35,7 @@ pub(crate) enum Keyword {
     Str,
     Print,
     Println,
+    Push,
 }
 // Kind equality only compares keyword/symbol patterns; float payloads are
 // never compared, so PartialEq (without Eq) is sufficient.
@@ -88,6 +89,7 @@ fn keyword(word: &str) -> Option<Keyword> {
         "false" => Keyword::False,
         "len" => Keyword::Len,
         "str" => Keyword::Str,
+        "push" => Keyword::Push,
         "print" => Keyword::Print,
         "println" => Keyword::Println,
         _ => return None,
