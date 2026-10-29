@@ -1488,6 +1488,8 @@ impl eframe::App for Studio {
                                 ui.label(format!("{} → {}", entry.actor, entry.target));
                                 ui.label(format!("{:?} / {:?}", entry.capability, entry.decision));
                                 ui.label(&entry.result);
+                                ui.label(format!("{} ms", entry.duration.as_millis()));
+                                ui.label(format!("t={} ms", entry.timestamp_ms));
                             });
                             ui.separator();
                         }
