@@ -91,6 +91,25 @@ fn diagnostics_belong_to_the_dependency_and_keep_unicode_columns() {
 }
 
 #[test]
+fn project_loader_rejects_invalid_utf8_dependency() {
+    let dir = tempfile::tempdir().expect("dir");
+    let entry = dir.path().join("main.ae");
+    fs::write(dir.path().join("broken.ae"), [0xff, 0xfe, 0x00]).expect("invalid module");
+    let error = project::compile(&entry, "mod broken; fn main() {}", &[])
+        .expect_err("invalid UTF-8 dependency");
+    assert!(error.message.contains("cannot load module"));
+    assert_eq!(
+        error.path,
+        Some(
+            dir.path()
+                .join("broken.ae")
+                .canonicalize()
+                .expect("canonical")
+        )
+    );
+}
+
+#[test]
 fn project_budgets_and_missing_modules_are_checked() {
     let dir = tempfile::tempdir().expect("dir");
     assert!(project::compile(dir.path(), "fn main() {}", &[]).is_err());
