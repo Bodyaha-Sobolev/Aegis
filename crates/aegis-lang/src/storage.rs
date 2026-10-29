@@ -121,9 +121,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("workspace");
         let root = dir.path();
         std::fs::create_dir(root.join("src")).expect("src");
+        let canonical_root = root.canonicalize().expect("canonical root");
         assert_eq!(
             confined_path(root, Path::new("src/main.ae")).expect("relative"),
-            root.join("src/main.ae")
+            canonical_root.join("src/main.ae")
         );
         assert!(confined_path(root, Path::new("../outside.ae")).is_err());
         assert!(confined_path(root, Path::new("C:\\outside.ae")).is_err());
