@@ -111,6 +111,7 @@ struct Studio {
     analysis_stamp: Option<editor_project::Stamp>,
     permission_ledger: permissions::PermissionLedger,
     active_run_permission: Option<u64>,
+    audit_open: bool,
 }
 impl Default for Studio {
     fn default() -> Self {
@@ -155,6 +156,7 @@ impl Default for Studio {
             analysis_stamp: None,
             permission_ledger: permissions::PermissionLedger::default(),
             active_run_permission: None,
+            audit_open: false,
         }
     }
 }
@@ -879,12 +881,17 @@ impl Studio {
                             ui.close();
                         }
                     });
-                    ui.label(
-                        RichText::new(format!("Audit {}", self.permission_ledger.len()))
-                            .size(11.0)
-                            .color(MUTED),
-                    )
-                    .on_hover_text("Разрешённые действия IDE записываются локально");
+                    if ui
+                        .button(
+                            RichText::new(format!("Audit {}", self.permission_ledger.len()))
+                                .size(11.0)
+                                .color(MUTED),
+                        )
+                        .on_hover_text("Открыть журнал разрешённых действий IDE")
+                        .clicked()
+                    {
+                        self.audit_open = true;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some((_, stop)) = &self.run {
                             if ui
@@ -1459,6 +1466,25 @@ impl eframe::App for Studio {
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.label(aegis_lang::THIRD_PARTY_NOTICES);
+                    });
+                });
+        }
+        if self.audit_open {
+            egui::Window::new("Permission audit")
+                .open(&mut self.audit_open)
+                .default_size([720.0, 360.0])
+                .show(ctx, |ui| {
+                    ui.label("Журнал содержит только метаданные действий; содержимое файлов и секреты не записываются.");
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for entry in self.permission_ledger.entries() {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.monospace(format!("#{}", entry.request_id));
+                                ui.label(format!("{} → {}", entry.actor, entry.target));
+                                ui.label(format!("{:?} / {:?}", entry.capability, entry.decision));
+                                ui.label(&entry.result);
+                            });
+                            ui.separator();
+                        }
                     });
                 });
         }
