@@ -111,6 +111,7 @@ struct Studio {
     analysis_stamp: Option<editor_project::Stamp>,
     permission_ledger: permissions::PermissionLedger,
     active_run_permission: Option<u64>,
+    active_run_started: Option<Instant>,
     audit_open: bool,
 }
 impl Default for Studio {
@@ -156,6 +157,7 @@ impl Default for Studio {
             analysis_stamp: None,
             permission_ledger: permissions::PermissionLedger::default(),
             active_run_permission: None,
+            active_run_started: None,
             audit_open: false,
         }
     }
@@ -535,6 +537,7 @@ impl Studio {
                                     permissions::Decision::Allow,
                                     "user requested Build and run",
                                 ));
+                                self.active_run_started = Some(Instant::now());
                                 self.log("\nRunning…\n");
                                 self.status = "Program running".into();
                                 runner::run(path, run_id, stop, self.sender.clone());
@@ -601,8 +604,11 @@ impl Studio {
                                 Ok((code, _)) => format!("exit:{code}"),
                                 Err(_) => String::from("runner-error"),
                             };
-                            self.permission_ledger
-                                .finish(request_id, &result, Duration::ZERO);
+                            let duration = self
+                                .active_run_started
+                                .take()
+                                .map_or(Duration::ZERO, |started| started.elapsed());
+                            self.permission_ledger.finish(request_id, &result, duration);
                         }
                         match result {
                             Ok((code, time)) => {
