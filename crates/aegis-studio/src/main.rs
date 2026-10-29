@@ -6,6 +6,7 @@ mod editor_project;
 mod highlighting;
 mod inspector;
 mod navigation;
+mod permissions;
 mod runner;
 
 use aegis_lang::{Diagnostic, FunctionInfo, codec, storage};
