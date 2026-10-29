@@ -127,6 +127,7 @@ mod tests {
         assert!(ledger.finish(allow, "ok", Duration::from_millis(3)));
         assert!(!ledger.finish(99, "missing", Duration::ZERO));
         assert_eq!(ledger.entries()[0].result, "ok");
+        assert_eq!(ledger.entries()[0].duration, Duration::from_millis(3));
         assert_eq!(ledger.entries()[1].decision, Decision::Deny);
         assert!(!ledger.entries()[0].target.contains("secret"));
     }
