@@ -71,7 +71,10 @@ impl PermissionLedger {
     }
 
     pub(crate) fn finish(&mut self, request_id: u64, result: &str, duration: Duration) -> bool {
-        let Some(entry) = self.entries.iter_mut().find(|entry| entry.request_id == request_id)
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.request_id == request_id)
         else {
             return false;
         };
@@ -83,6 +86,10 @@ impl PermissionLedger {
     pub(crate) fn entries(&self) -> &[AuditEntry] {
         &self.entries
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 #[cfg(test)]
@@ -92,8 +99,22 @@ mod tests {
     #[test]
     fn records_allow_deny_and_cancel_without_secrets() {
         let mut ledger = PermissionLedger::default();
-        let allow = ledger.request("mcp:test", Capability::InspectFile, "fixture.exe", "sha256:x", Decision::Allow, "user approved");
-        let deny = ledger.request("mcp:test", Capability::WriteWorkspace, "project", "sha256:y", Decision::Deny, "not approved");
+        let allow = ledger.request(
+            "mcp:test",
+            Capability::InspectFile,
+            "fixture.exe",
+            "sha256:x",
+            Decision::Allow,
+            "user approved",
+        );
+        let deny = ledger.request(
+            "mcp:test",
+            Capability::WriteWorkspace,
+            "project",
+            "sha256:y",
+            Decision::Deny,
+            "not approved",
+        );
         assert_eq!(allow, 0);
         assert_eq!(deny, 1);
         assert!(ledger.finish(allow, "ok", Duration::from_millis(3)));

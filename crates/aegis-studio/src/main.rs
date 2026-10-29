@@ -599,7 +599,8 @@ impl Studio {
                                 Ok((code, _)) => format!("exit:{code}"),
                                 Err(_) => String::from("runner-error"),
                             };
-                            self.permission_ledger.finish(request_id, &result, Duration::ZERO);
+                            self.permission_ledger
+                                .finish(request_id, &result, Duration::ZERO);
                         }
                         match result {
                             Ok((code, time)) => {
@@ -878,6 +879,12 @@ impl Studio {
                             ui.close();
                         }
                     });
+                    ui.label(
+                        RichText::new(format!("Audit {}", self.permission_ledger.len()))
+                            .size(11.0)
+                            .color(MUTED),
+                    )
+                    .on_hover_text("Разрешённые действия IDE записываются локально");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some((_, stop)) = &self.run {
                             if ui
