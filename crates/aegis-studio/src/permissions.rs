@@ -46,6 +46,8 @@ pub(crate) struct PermissionLedger {
     entries: Vec<AuditEntry>,
 }
 
+const MAX_ENTRIES: usize = 4096;
+
 impl PermissionLedger {
     pub(crate) fn request(
         &mut self,
@@ -74,6 +76,9 @@ impl PermissionLedger {
             result: String::from("pending"),
             duration: Duration::ZERO,
         });
+        if self.entries.len() > MAX_ENTRIES {
+            self.entries.remove(0);
+        }
         request_id
     }
 
@@ -138,5 +143,25 @@ mod tests {
         assert_eq!(first, parameter_hash("C:\\workspace\\main.ae"));
         assert!(first.starts_with("hash64:"));
         assert!(!first.contains("workspace"));
+    }
+
+    #[test]
+    fn audit_memory_is_bounded_and_keeps_latest_entry() {
+        let mut ledger = PermissionLedger::default();
+        for _ in 0..(MAX_ENTRIES + 3) {
+            ledger.request(
+                "test",
+                Capability::InspectFile,
+                "fixture",
+                "hash64:x",
+                Decision::Deny,
+                "test",
+            );
+        }
+        assert_eq!(ledger.len(), MAX_ENTRIES);
+        assert_eq!(
+            ledger.entries().last().map(|entry| entry.request_id),
+            Some((MAX_ENTRIES + 2) as u64)
+        );
     }
 }
