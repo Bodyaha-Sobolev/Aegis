@@ -212,6 +212,15 @@ impl Studio {
         if self.inspecting {
             return;
         }
+        let target = path.display().to_string();
+        let request_id = self.permission_ledger.request(
+            "studio",
+            permissions::Capability::InspectFile,
+            &target,
+            &permissions::parameter_hash(&target),
+            permissions::Decision::Allow,
+            "user requested binary inspection",
+        );
         self.inspecting = true;
         self.status = "Inspecting binary…".into();
         let sender = self.sender.clone();
@@ -226,6 +235,8 @@ impl Studio {
             let _ = sender.send(Event::Inspected(path, result));
             ctx.request_repaint();
         });
+        self.permission_ledger
+            .finish(request_id, "scheduled", Duration::ZERO);
     }
     fn fail(&mut self, error: impl AsRef<str>) {
         self.status = "Operation failed".into();
