@@ -261,26 +261,15 @@ impl Loader<'_> {
                         }
                         Zeroizing::new(overlay.text.to_string())
                     } else {
-                        let bytes = Zeroizing::new(
-                            storage::read_bounded(&child, MAX_SOURCE).map_err(|error| {
+                        Zeroizing::new(storage::read_text_bounded(&child, MAX_SOURCE).map_err(
+                            |error| {
                                 self.error(
                                     file,
                                     declaration.clone(),
                                     format!("cannot load module {}: {error}", child.display()),
                                 )
-                            })?,
-                        );
-                        Zeroizing::new(
-                            std::str::from_utf8(&bytes)
-                                .map_err(|_| {
-                                    self.error(
-                                        file,
-                                        declaration.clone(),
-                                        "module source must be UTF-8",
-                                    )
-                                })?
-                                .to_owned(),
-                        )
+                            },
+                        )?)
                     };
                     let child_file = self.files.len();
                     self.expand(child, text, &child_scope)?;
