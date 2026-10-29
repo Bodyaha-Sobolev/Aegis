@@ -1,8 +1,28 @@
 use std::{
     fs::File,
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
+
+/// Resolves a workspace-relative path without allowing traversal outside root.
+pub fn confined_path(root: &Path, relative: &Path) -> io::Result<PathBuf> {
+    if relative.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "absolute path is not allowed",
+        ));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "path traversal is not allowed",
+        ));
+    }
+    Ok(root.join(relative))
+}
 
 /// Size is enforced while reading, including if the file grows after metadata.
 pub fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
@@ -74,5 +94,16 @@ mod tests {
         assert_eq!(read_text_bounded(&path, 32).expect("unchanged"), "старый");
         atomic_write(&path, &[0xff]).expect("invalid fixture");
         assert!(read_text_bounded(&path, 32).is_err());
+    }
+
+    #[test]
+    fn confined_paths_reject_absolute_and_parent_components() {
+        let root = Path::new("workspace");
+        assert_eq!(
+            confined_path(root, Path::new("src/main.ae")).expect("relative"),
+            root.join("src/main.ae")
+        );
+        assert!(confined_path(root, Path::new("../outside.ae")).is_err());
+        assert!(confined_path(root, Path::new("C:\\outside.ae")).is_err());
     }
 }
