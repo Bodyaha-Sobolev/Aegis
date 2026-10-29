@@ -2,6 +2,13 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub(crate) fn parameter_hash(value: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("hash64:{:016x}", hasher.finish())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capability {
     ReadWorkspace,
@@ -122,5 +129,13 @@ mod tests {
         assert_eq!(ledger.entries()[0].result, "ok");
         assert_eq!(ledger.entries()[1].decision, Decision::Deny);
         assert!(!ledger.entries()[0].target.contains("secret"));
+    }
+
+    #[test]
+    fn parameter_hash_is_stable_and_does_not_echo_input() {
+        let first = parameter_hash("C:\\workspace\\main.ae");
+        assert_eq!(first, parameter_hash("C:\\workspace\\main.ae"));
+        assert!(first.starts_with("hash64:"));
+        assert!(!first.contains("workspace"));
     }
 }

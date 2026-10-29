@@ -531,7 +531,7 @@ impl Studio {
                                     "studio",
                                     permissions::Capability::RunOwnedChild,
                                     &path.display().to_string(),
-                                    "local-build-output",
+                                    &permissions::parameter_hash(&path.display().to_string()),
                                     permissions::Decision::Allow,
                                     "user requested Build and run",
                                 ));
