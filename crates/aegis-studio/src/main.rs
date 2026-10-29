@@ -109,6 +109,8 @@ struct Studio {
     inspecting: bool,
     project_entry: Option<PathBuf>,
     analysis_stamp: Option<editor_project::Stamp>,
+    permission_ledger: permissions::PermissionLedger,
+    active_run_permission: Option<u64>,
 }
 impl Default for Studio {
     fn default() -> Self {
@@ -151,6 +153,8 @@ impl Default for Studio {
             inspecting: false,
             project_entry: None,
             analysis_stamp: None,
+            permission_ledger: permissions::PermissionLedger::default(),
+            active_run_permission: None,
         }
     }
 }
@@ -521,6 +525,14 @@ impl Studio {
                                 let run_id = self.next_run;
                                 let stop = Arc::new(AtomicBool::new(false));
                                 self.run = Some((run_id, stop.clone()));
+                                self.active_run_permission = Some(self.permission_ledger.request(
+                                    "studio",
+                                    permissions::Capability::RunOwnedChild,
+                                    &path.display().to_string(),
+                                    "local-build-output",
+                                    permissions::Decision::Allow,
+                                    "user requested Build and run",
+                                ));
                                 self.log("\nRunning…\n");
                                 self.status = "Program running".into();
                                 runner::run(path, run_id, stop, self.sender.clone());
@@ -582,6 +594,13 @@ impl Studio {
                 Event::Finished(id, result) => {
                     if self.run.as_ref().is_some_and(|(run, _)| *run == id) {
                         self.run = None;
+                        if let Some(request_id) = self.active_run_permission.take() {
+                            let result = match &result {
+                                Ok((code, _)) => format!("exit:{code}"),
+                                Err(_) => String::from("runner-error"),
+                            };
+                            self.permission_ledger.finish(request_id, &result, Duration::ZERO);
+                        }
                         match result {
                             Ok((code, time)) => {
                                 self.status = format!("Program exited with code {code}");
