@@ -21,7 +21,27 @@ pub fn confined_path(root: &Path, relative: &Path) -> io::Result<PathBuf> {
             "path traversal is not allowed",
         ));
     }
-    Ok(root.join(relative))
+    let root = root.canonicalize()?;
+    let candidate = root.join(relative);
+    let checked =
+        if candidate.exists() {
+            candidate.canonicalize()?
+        } else {
+            let parent = candidate
+                .parent()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?
+                .canonicalize()?;
+            parent.join(candidate.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
+            })?)
+        };
+    if !checked.starts_with(&root) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "path escapes workspace",
+        ));
+    }
+    Ok(checked)
 }
 
 /// Size is enforced while reading, including if the file grows after metadata.
@@ -98,7 +118,9 @@ mod tests {
 
     #[test]
     fn confined_paths_reject_absolute_and_parent_components() {
-        let root = Path::new("workspace");
+        let dir = tempfile::tempdir().expect("workspace");
+        let root = dir.path();
+        std::fs::create_dir(root.join("src")).expect("src");
         assert_eq!(
             confined_path(root, Path::new("src/main.ae")).expect("relative"),
             root.join("src/main.ae")
