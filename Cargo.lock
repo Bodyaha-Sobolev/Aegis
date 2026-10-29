@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-cli"
-version = "0.2.22-alpha.1"
+version = "0.2.23-alpha.1"
 dependencies = [
  "aegis-lang",
  "zeroize",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-lang"
-version = "0.2.22-alpha.1"
+version = "0.2.23-alpha.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-studio"
-version = "0.2.22-alpha.1"
+version = "0.2.23-alpha.1"
 dependencies = [
  "aegis-lang",
  "eframe",
