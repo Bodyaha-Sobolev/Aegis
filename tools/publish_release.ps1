@@ -48,13 +48,26 @@ $releaseBody = @{
     prerelease = $true
     generate_release_notes = $false
 } | ConvertTo-Json
-$release = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/Bodyaha-Sobolev/Aegis/releases" -Headers $headers -Body $releaseBody -ContentType "application/json"
+$releaseUri = "https://api.github.com/repos/Bodyaha-Sobolev/Aegis/releases"
+try {
+    $release = Invoke-RestMethod -Method Get -Uri ($releaseUri + "/tags/" + $Tag) -Headers $headers
+} catch {
+    $release = Invoke-RestMethod -Method Post -Uri $releaseUri -Headers $headers -Body $releaseBody -ContentType "application/json"
+}
 $uploadBase = $release.upload_url -replace '\{\?name,label\}$', ''
 foreach ($asset in $assets) {
     $contentType = if ($asset.EndsWith('.txt')) { 'text/plain' } else { 'application/octet-stream' }
     $assetHeaders = $headers.Clone()
     $assetHeaders['Content-Type'] = $contentType
     $uri = $uploadBase + '?name=' + [uri]::EscapeDataString($asset)
-    Invoke-RestMethod -Method Post -Uri $uri -Headers $assetHeaders -InFile (Join-Path $root $asset) | Out-Null
+    try {
+        Invoke-RestMethod -Method Post -Uri $uri -Headers $assetHeaders -InFile (Join-Path $root $asset) | Out-Null
+    } catch {
+        $existing = Invoke-RestMethod -Method Get -Uri ($release.assets_url) -Headers $headers |
+            Where-Object { $_.name -eq $asset }
+        if ($null -eq $existing) { throw }
+        Invoke-RestMethod -Method Delete -Uri $existing.url -Headers $headers | Out-Null
+        Invoke-RestMethod -Method Post -Uri $uri -Headers $assetHeaders -InFile (Join-Path $root $asset) | Out-Null
+    }
 }
 Write-Output $release.html_url
