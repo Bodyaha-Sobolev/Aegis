@@ -43,8 +43,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" aegis.exe aegis-cli.exe SHA256SUMS.txt THIRD_PARTY_NOTICES.txt `
-            --repo "${{ github.repository }}" `
-            --title "Aegis ${{ github.ref_name }}" `
-            --generate-notes `
-            --prerelease
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag aegis.exe aegis-cli.exe SHA256SUMS.txt THIRD_PARTY_NOTICES.txt `
+              --repo "${{ github.repository }}" `
+              --title "Aegis $tag" `
+              --generate-notes `
+              --prerelease
+          } else {
+            gh release upload $tag aegis.exe aegis-cli.exe SHA256SUMS.txt THIRD_PARTY_NOTICES.txt `
+              --repo "${{ github.repository }}" --clobber
+          }
