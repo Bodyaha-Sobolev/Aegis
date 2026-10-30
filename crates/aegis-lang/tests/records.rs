@@ -49,7 +49,7 @@ fn composite_comparison_reports_explicit_unsupported_diagnostic() {
     assert!(
         error
             .message
-            .contains("comparison of composite values is not implemented yet")
+            .contains("expected a scalar value, found aggregate")
     );
     assert_eq!(error, analyze(source).expect_err("IDE/compiler parity"));
 }
