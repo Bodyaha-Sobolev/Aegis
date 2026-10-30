@@ -145,6 +145,12 @@ impl Type {
     pub fn single(&self) -> bool {
         matches!(self, Self::F32)
     }
+    pub fn composite(&self) -> bool {
+        matches!(
+            self,
+            Self::Array(..) | Self::Dyn(_) | Self::Record(_) | Self::Enum(_)
+        )
+    }
 }
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

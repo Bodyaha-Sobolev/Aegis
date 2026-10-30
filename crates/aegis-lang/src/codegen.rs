@@ -2004,6 +2004,12 @@ impl Generator<'_> {
                 return Ok(());
             }
             ExprKind::Binary(op, left, right) => {
+                if left.ty.composite() && matches!(*op, "==" | "!=" | "<" | ">" | "<=" | ">=") {
+                    return Err(self.error(
+                        &expr.span,
+                        "comparison of composite values is not implemented yet",
+                    ));
+                }
                 if left.ty == Type::Str {
                     self.str_temp(left)?;
                     self.push();
