@@ -3,7 +3,7 @@ use std::{env, hint::black_box, time::Instant};
 
 fn main() {
     let mut iterations = 1000usize;
-    let mut scenario = "factorial";
+    let mut scenario = String::from("factorial");
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -23,7 +23,7 @@ fn main() {
             other => panic!("unknown argument: {other}"),
         }
     }
-    let source = match scenario {
+    let source = match scenario.as_str() {
         "factorial" => include_str!("../../../examples/factorial.ae"),
         "arrays" => include_str!("../../../examples/arrays.ae"),
         "structs" => include_str!("../../../examples/structs.ae"),
