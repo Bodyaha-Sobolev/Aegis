@@ -1516,6 +1516,9 @@ impl eframe::App for Studio {
                 .default_size([720.0, 360.0])
                 .show(ctx, |ui| {
                     ui.label("Журнал содержит только метаданные действий; содержимое файлов и секреты не записываются.");
+                    if ui.button("Copy redacted TSV").clicked() {
+                        ctx.copy_text(self.permission_ledger.redacted_tsv());
+                    }
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for entry in self.permission_ledger.entries() {
                             ui.horizontal_wrapped(|ui| {

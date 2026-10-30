@@ -102,6 +102,33 @@ impl PermissionLedger {
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// Returns a stable, machine-readable snapshot suitable for copying out of
+    /// the IDE. Targets and free-form reasons are hashed so the export cannot
+    /// accidentally disclose paths, prompts, or other sensitive metadata.
+    pub(crate) fn redacted_tsv(&self) -> String {
+        let mut output = String::from(
+            "request_id\ttimestamp_ms\tactor\tcapability\ttarget_hash\tparameters_hash\tdecision\treason_hash\tresult\tduration_ms\n",
+        );
+        for entry in &self.entries {
+            use std::fmt::Write;
+            let _ = writeln!(
+                output,
+                "{}\t{}\t{}\t{:?}\t{}\t{}\t{:?}\t{}\t{}\t{}",
+                entry.request_id,
+                entry.timestamp_ms,
+                parameter_hash(&entry.actor),
+                entry.capability,
+                parameter_hash(&entry.target),
+                entry.parameters_hash,
+                entry.decision,
+                parameter_hash(&entry.reason),
+                entry.result,
+                entry.duration.as_millis()
+            );
+        }
+        output
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +190,24 @@ mod tests {
             ledger.entries().last().map(|entry| entry.request_id),
             Some((MAX_ENTRIES + 2) as u64)
         );
+    }
+
+    #[test]
+    fn redacted_export_has_schema_without_sensitive_values() {
+        let mut ledger = PermissionLedger::default();
+        ledger.request(
+            "mcp:secret-agent",
+            Capability::ReadWorkspace,
+            "C:\\private\\token.txt",
+            "hash64:abc",
+            Decision::Deny,
+            "contains secret prompt",
+        );
+        let export = ledger.redacted_tsv();
+        assert!(export.starts_with("request_id\ttimestamp_ms\tactor"));
+        assert!(export.contains("hash64:"));
+        assert!(!export.contains("private"));
+        assert!(!export.contains("secret-agent"));
+        assert!(!export.contains("secret prompt"));
     }
 }
