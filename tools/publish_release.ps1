@@ -52,6 +52,10 @@ $releaseUri = "https://api.github.com/repos/Bodyaha-Sobolev/Aegis/releases"
 try {
     $release = Invoke-RestMethod -Method Get -Uri ($releaseUri + "/tags/" + $Tag) -Headers $headers
 } catch {
+    $statusCode = $_.Exception.Response.StatusCode.value__
+    if ($statusCode -ne 404) {
+        throw
+    }
     $release = Invoke-RestMethod -Method Post -Uri $releaseUri -Headers $headers -Body $releaseBody -ContentType "application/json"
 }
 $uploadBase = $release.upload_url -replace '\{\?name,label\}$', ''
@@ -63,6 +67,10 @@ foreach ($asset in $assets) {
     try {
         Invoke-RestMethod -Method Post -Uri $uri -Headers $assetHeaders -InFile (Join-Path $root $asset) | Out-Null
     } catch {
+        $statusCode = $_.Exception.Response.StatusCode.value__
+        if ($statusCode -ne 422) {
+            throw
+        }
         $existing = Invoke-RestMethod -Method Get -Uri ($release.assets_url) -Headers $headers |
             Where-Object { $_.name -eq $asset }
         if ($null -eq $existing) { throw }
