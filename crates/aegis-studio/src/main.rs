@@ -111,6 +111,7 @@ struct Studio {
     analysis_stamp: Option<editor_project::Stamp>,
     permission_ledger: permissions::PermissionLedger,
     active_save_permission: Option<u64>,
+    active_save_started: Option<Instant>,
     active_run_permission: Option<u64>,
     active_run_started: Option<Instant>,
     audit_open: bool,
@@ -158,6 +159,7 @@ impl Default for Studio {
             analysis_stamp: None,
             permission_ledger: permissions::PermissionLedger::default(),
             active_save_permission: None,
+            active_save_started: None,
             active_run_permission: None,
             active_run_started: None,
             audit_open: false,
@@ -385,6 +387,7 @@ impl Studio {
             permissions::Decision::Allow,
             "user requested source save",
         ));
+        self.active_save_started = Some(Instant::now());
         if protected {
             self.unlock = Some(Unlock {
                 action: ProtectedAction::Save {
@@ -604,8 +607,11 @@ impl Studio {
                         } else {
                             "save-error"
                         };
-                        self.permission_ledger
-                            .finish(request_id, result, Duration::ZERO);
+                        let duration = self
+                            .active_save_started
+                            .take()
+                            .map_or(Duration::ZERO, |started| started.elapsed());
+                        self.permission_ledger.finish(request_id, result, duration);
                     }
                     match result {
                         Err(e) => {
