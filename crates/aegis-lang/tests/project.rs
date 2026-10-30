@@ -102,9 +102,9 @@ fn project_loader_rejects_invalid_utf8_dependency() {
         error.path,
         Some(
             dir.path()
-                .join("broken.ae")
                 .canonicalize()
-                .expect("canonical")
+                .expect("canonical root")
+                .join("main.ae")
         )
     );
 }
