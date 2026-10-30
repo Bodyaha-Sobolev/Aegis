@@ -996,3 +996,7 @@ reason заменяются hash64, а параметры уже хранятс�
 GitHub Actions workflow .github/workflows/release.yml автоматически публикует prerelease для тегов v*.*.*-alpha.*: Windows-сборка, SHA256SUMS.txt и четыре asset-файла через gh release create. Workflow использует только contents: write и токен GitHub Actions.
 
 Поля in-memory PermissionLedger ограничены: actor 128 байт, target 1024, parameters_hash 128, reason 512, result 512. Усечение идёт по границе UTF-8 и добавляет маркер продолжения; общий журнал ограничен 4096 последними записями.
+
+Идентификаторы запросов выдаются циклически по `u64` с проверкой занятых
+значений в удерживаемом окне. Переход через `u64::MAX` не создаёт повторной
+записи и покрыт unit-тестом.
