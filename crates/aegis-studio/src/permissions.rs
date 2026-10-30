@@ -9,6 +9,14 @@ pub(crate) fn parameter_hash(value: &str) -> String {
     format!("hash64:{:016x}", hasher.finish())
 }
 
+fn escape_tsv(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capability {
     ReadWorkspace,
@@ -123,7 +131,7 @@ impl PermissionLedger {
                 entry.parameters_hash,
                 entry.decision,
                 parameter_hash(&entry.reason),
-                entry.result,
+                escape_tsv(&entry.result),
                 entry.duration.as_millis()
             );
         }
@@ -209,5 +217,22 @@ mod tests {
         assert!(!export.contains("private"));
         assert!(!export.contains("secret-agent"));
         assert!(!export.contains("secret prompt"));
+    }
+
+    #[test]
+    fn redacted_export_keeps_one_record_per_line() {
+        let mut ledger = PermissionLedger::default();
+        let id = ledger.request(
+            "test",
+            Capability::InspectFile,
+            "fixture",
+            "hash64:x",
+            Decision::Allow,
+            "ok",
+        );
+        assert!(ledger.finish(id, "line one\nline two\tcolumn", Duration::ZERO));
+        let export = ledger.redacted_tsv();
+        assert_eq!(export.lines().count(), 2);
+        assert!(export.contains("line one\\nline two\\tcolumn"));
     }
 }
