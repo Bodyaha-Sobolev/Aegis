@@ -298,3 +298,17 @@ HANDOFF.md                  сведения для следующего раз�
 Многофайловый проект: `aegis-cli build examples/project/main.ae`.
 Откройте main.ae в IDE для сборки того же проекта; другие входы выбираются через
 File → Use active file as project entry. Подробности путей и бюджетов — LANGUAGE.md.
+
+## Публикация prerelease
+
+После создания и отправки тега `vX.Y.Z-alpha.N` GitHub Actions автоматически
+собирает Windows x64 и публикует `aegis.exe`, `aegis-cli.exe`,
+`SHA256SUMS.txt` и `THIRD_PARTY_NOTICES.txt`. Локальный повторяемый вариант:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/publish_release.ps1 `
+  -Tag v0.2.29-alpha.4 -Build
+```
+
+Скрипт получает токен через Git credential helper, не сохраняет его в проекте и
+безопасно переиспользует уже опубликованные assets.
