@@ -179,7 +179,10 @@ C-раскладка строк/агрегатов, указатели, callback
 Он не заменяет полную ручную проверку клавиатуры, IME, диалогов и разных DPI.
 
 Замер компилятора: `cargo run --release -p aegis-lang --example bench`.
-Это время полной компиляции примера, не наносекундная задержка формулы.
+Профиль принимает `--iterations N` и `--scenario factorial|arrays|structs`,
+а выводит стабильные поля `scenario`, `iterations`, `us_per_compile` и
+`native_code_bytes`. Это время полной компиляции примера, не наносекундная
+задержка формулы.
 
 Замер роста массивов: `py tools\bench_array_growth.py --compiler current=.\aegis-cli.exe`.
 Для сравнения добавить `--compiler previous=<путь к прежнему aegis-cli.exe>`.
