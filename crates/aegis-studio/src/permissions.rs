@@ -112,8 +112,17 @@ impl PermissionLedger {
         decision: Decision,
         reason: &str,
     ) -> u64 {
-        let request_id = self.next_request;
-        self.next_request = self.next_request.saturating_add(1);
+        let request_id = loop {
+            let candidate = self.next_request;
+            self.next_request = self.next_request.wrapping_add(1);
+            if !self
+                .entries
+                .iter()
+                .any(|entry| entry.request_id == candidate)
+            {
+                break candidate;
+            }
+        };
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -309,5 +318,39 @@ mod tests {
         assert!(entry.reason.len() <= MAX_REASON_BYTES + "…".len());
         assert!(entry.result.len() <= MAX_RESULT_BYTES + "…".len());
         assert!(entry.target.is_char_boundary(entry.target.len()));
+    }
+
+    #[test]
+    fn request_ids_wrap_without_colliding_with_retained_entries() {
+        let mut ledger = PermissionLedger {
+            next_request: u64::MAX,
+            entries: Vec::new(),
+        };
+        assert_eq!(
+            ledger.request(
+                "test",
+                Capability::InspectFile,
+                "one",
+                "h",
+                Decision::Allow,
+                "ok"
+            ),
+            u64::MAX
+        );
+        assert_eq!(
+            ledger.request(
+                "test",
+                Capability::InspectFile,
+                "two",
+                "h",
+                Decision::Allow,
+                "ok"
+            ),
+            0
+        );
+        assert_ne!(
+            ledger.entries()[0].request_id,
+            ledger.entries()[1].request_id
+        );
     }
 }
