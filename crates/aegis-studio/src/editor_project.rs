@@ -11,15 +11,26 @@ use zeroize::Zeroizing;
 pub struct Stamp {
     docs: Vec<(u64, u64, Option<PathBuf>, bool)>,
     entry: Option<PathBuf>,
+    source_fingerprint: u64,
 }
 impl Stamp {
     pub fn new(docs: &[Document], entry: &Option<PathBuf>) -> Self {
+        let mut source_fingerprint = 0xcbf29ce484222325u64;
+        for doc in docs {
+            for byte in doc.text.as_bytes() {
+                source_fingerprint ^= u64::from(*byte);
+                source_fingerprint = source_fingerprint.wrapping_mul(0x100000001b3);
+            }
+            source_fingerprint ^= doc.id;
+            source_fingerprint = source_fingerprint.wrapping_mul(0x100000001b3);
+        }
         Self {
             docs: docs
                 .iter()
                 .map(|doc| (doc.id, doc.revision, doc.path.clone(), doc.protected))
                 .collect(),
             entry: entry.clone(),
+            source_fingerprint,
         }
     }
 }
