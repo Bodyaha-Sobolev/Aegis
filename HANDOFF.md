@@ -993,6 +993,10 @@ reason заменяются hash64, а параметры уже хранятс�
 
 Для публикации следующего prerelease используется tools/publish_release.ps1 -Tag vX.Y.Z-alpha.N -Build: скрипт проверяет четыре asset-файла, пересоздаёт SHA256SUMS.txt, создаёт GitHub prerelease через API и загружает бинарники без сохранения токена в файлах.
 
+Скрипт идемпотентен: повторный запуск для существующего тега переиспользует
+релиз и заменяет одноимённые assets, поэтому временный сбой сети или повторный
+запуск CI не создаёт дубликаты релизов.
+
 GitHub Actions workflow .github/workflows/release.yml автоматически публикует prerelease для тегов v*.*.*-alpha.*: Windows-сборка, SHA256SUMS.txt и четыре asset-файла через gh release create. Workflow использует только contents: write и токен GitHub Actions.
 
 Поля in-memory PermissionLedger ограничены: actor 128 байт, target 1024, parameters_hash 128, reason 512, result 512. Усечение идёт по границе UTF-8 и добавляет маркер продолжения; общий журнал ограничен 4096 последними записями.
