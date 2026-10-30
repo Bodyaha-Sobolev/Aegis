@@ -314,7 +314,8 @@ mod tests {
         assert!(ledger.finish(id, "line one\nline two\tcolumn", Duration::ZERO));
         let export = ledger.redacted_tsv();
         assert_eq!(export.lines().count(), 2);
-        assert!(export.contains("line one\\nline two\\tcolumn"));
+        assert!(!export.contains("line one"));
+        assert!(export.contains("hash64:"));
     }
 
     #[test]
