@@ -83,6 +83,24 @@ pub(crate) struct PermissionLedger {
 }
 
 const MAX_ENTRIES: usize = 4096;
+const MAX_ACTOR_BYTES: usize = 128;
+const MAX_TARGET_BYTES: usize = 1024;
+const MAX_HASH_BYTES: usize = 128;
+const MAX_REASON_BYTES: usize = 512;
+const MAX_RESULT_BYTES: usize = 512;
+
+fn bounded_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut output = value[..end].to_owned();
+    output.push('…');
+    output
+}
 
 impl PermissionLedger {
     pub(crate) fn request(
@@ -103,12 +121,12 @@ impl PermissionLedger {
         self.entries.push(AuditEntry {
             request_id,
             timestamp_ms,
-            actor: actor.to_owned(),
+            actor: bounded_text(actor, MAX_ACTOR_BYTES),
             capability,
-            target: target.to_owned(),
-            parameters_hash: parameters_hash.to_owned(),
+            target: bounded_text(target, MAX_TARGET_BYTES),
+            parameters_hash: bounded_text(parameters_hash, MAX_HASH_BYTES),
             decision,
-            reason: reason.to_owned(),
+            reason: bounded_text(reason, MAX_REASON_BYTES),
             result: String::from("pending"),
             duration: Duration::ZERO,
         });
@@ -126,7 +144,7 @@ impl PermissionLedger {
         else {
             return false;
         };
-        entry.result = result.to_owned();
+        entry.result = bounded_text(result, MAX_RESULT_BYTES);
         entry.duration = duration;
         true
     }
@@ -270,5 +288,26 @@ mod tests {
         assert_eq!(Capability::RunOwnedChild.as_str(), "run_owned_child");
         assert_eq!(Capability::LoadFfi.as_str(), "load_ffi");
         assert_eq!(Decision::Cancel.as_str(), "cancel");
+    }
+
+    #[test]
+    fn audit_fields_are_bounded_on_utf8_boundaries() {
+        let mut ledger = PermissionLedger::default();
+        let id = ledger.request(
+            &"actor".repeat(200),
+            Capability::WriteWorkspace,
+            &"путь/".repeat(400),
+            &"hash".repeat(200),
+            Decision::Allow,
+            &"причина".repeat(200),
+        );
+        assert!(ledger.finish(id, &"результат".repeat(200), Duration::ZERO));
+        let entry = &ledger.entries()[0];
+        assert!(entry.actor.len() <= MAX_ACTOR_BYTES + "…".len());
+        assert!(entry.target.len() <= MAX_TARGET_BYTES + "…".len());
+        assert!(entry.parameters_hash.len() <= MAX_HASH_BYTES + "…".len());
+        assert!(entry.reason.len() <= MAX_REASON_BYTES + "…".len());
+        assert!(entry.result.len() <= MAX_RESULT_BYTES + "…".len());
+        assert!(entry.target.is_char_boundary(entry.target.len()));
     }
 }
