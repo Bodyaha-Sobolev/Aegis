@@ -110,6 +110,7 @@ struct Studio {
     project_entry: Option<PathBuf>,
     analysis_stamp: Option<editor_project::Stamp>,
     permission_ledger: permissions::PermissionLedger,
+    active_save_permission: Option<u64>,
     active_run_permission: Option<u64>,
     active_run_started: Option<Instant>,
     audit_open: bool,
@@ -156,6 +157,7 @@ impl Default for Studio {
             project_entry: None,
             analysis_stamp: None,
             permission_ledger: permissions::PermissionLedger::default(),
+            active_save_permission: None,
             active_run_permission: None,
             active_run_started: None,
             audit_open: false,
@@ -375,6 +377,14 @@ impl Studio {
         }
         let revision = doc.revision;
         let text = Zeroizing::new(doc.text.clone());
+        self.active_save_permission = Some(self.permission_ledger.request(
+            "studio",
+            permissions::Capability::WriteWorkspace,
+            &path.display().to_string(),
+            &permissions::parameter_hash(&path.display().to_string()),
+            permissions::Decision::Allow,
+            "user requested source save",
+        ));
         if protected {
             self.unlock = Some(Unlock {
                 action: ProtectedAction::Save {
@@ -588,6 +598,15 @@ impl Studio {
                     result,
                 } => {
                     self.busy = false;
+                    if let Some(request_id) = self.active_save_permission.take() {
+                        let result = if result.is_ok() {
+                            "saved"
+                        } else {
+                            "save-error"
+                        };
+                        self.permission_ledger
+                            .finish(request_id, result, Duration::ZERO);
+                    }
                     match result {
                         Err(e) => {
                             self.close_after_save = None;
