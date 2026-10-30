@@ -3,10 +3,15 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) fn parameter_hash(value: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("hash64:{:016x}", hasher.finish())
+    // FNV-1a is deliberately explicit here: DefaultHasher is seeded per
+    // process and would make audit records impossible to correlate after a
+    // restart. This is an identifier hash, not a password-hashing primitive.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("hash64:{hash:016x}")
 }
 
 fn escape_tsv(value: &str) -> String {
@@ -176,6 +181,7 @@ mod tests {
     fn parameter_hash_is_stable_and_does_not_echo_input() {
         let first = parameter_hash("C:\\workspace\\main.ae");
         assert_eq!(first, parameter_hash("C:\\workspace\\main.ae"));
+        assert_eq!(first, "hash64:6da20505e2f5d0d2");
         assert!(first.starts_with("hash64:"));
         assert!(!first.contains("workspace"));
     }
