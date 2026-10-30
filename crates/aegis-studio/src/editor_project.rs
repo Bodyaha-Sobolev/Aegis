@@ -132,6 +132,15 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_fingerprint_tracks_text_even_when_revision_is_unchanged() {
+        let mut docs = vec![Document::new(1, None, "fn main() {}".into(), false)];
+        let before = Stamp::new(&docs, &None);
+        docs[0].text.push_str(" // edited");
+        assert_ne!(before, Stamp::new(&docs, &None));
+    }
+
     #[test]
     fn named_entry_uses_unsaved_dependencies_and_keeps_input_files() {
         let dir = tempfile::tempdir().expect("dir");
