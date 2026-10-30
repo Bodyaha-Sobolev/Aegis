@@ -368,8 +368,8 @@ impl Studio {
             self.busy = true;
             self.status = "Saving source…".into();
             std::thread::spawn(move || {
-                let result =
-                    storage::atomic_write(&path, text.as_bytes()).map_err(|e| e.to_string());
+                let result = storage::atomic_write_text(&path, &text, aegis_lang::MAX_SOURCE)
+                    .map_err(|e| e.to_string());
                 let _ = events.send(Event::Saved {
                     id,
                     revision,
