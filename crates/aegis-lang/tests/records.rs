@@ -43,6 +43,18 @@ fn invalid_records_fail_equally_in_ide_and_compiler() {
 }
 
 #[test]
+fn composite_comparison_reports_explicit_unsupported_diagnostic() {
+    let source = "struct P { x:i64 } fn main() { let p=P { x:1 }; if(p==p) {} }";
+    let error = compile(source).expect_err("composite comparison must be rejected");
+    assert!(
+        error
+            .message
+            .contains("comparison of composite values is not implemented yet")
+    );
+    assert_eq!(error, analyze(source).expect_err("IDE/compiler parity"));
+}
+
+#[test]
 fn layouts_and_live_storage_are_bounded() {
     let fields = (0..256)
         .map(|i| format!("n{i}:i64"))
