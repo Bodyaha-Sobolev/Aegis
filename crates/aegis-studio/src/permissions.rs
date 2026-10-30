@@ -293,7 +293,12 @@ mod tests {
             "contains secret prompt",
         );
         let export = ledger.redacted_tsv();
-        assert!(export.starts_with("request_id\ttimestamp_ms\tactor"));
+        assert_eq!(
+            export.lines().next(),
+            Some(
+                "request_id\ttimestamp_ms\tactor\tcapability\ttarget_hash\tparameters_hash\tdecision\treason_hash\tresult\tduration_ms"
+            )
+        );
         assert!(export.contains("hash64:"));
         assert!(!export.contains("private"));
         assert!(!export.contains("secret-agent"));
