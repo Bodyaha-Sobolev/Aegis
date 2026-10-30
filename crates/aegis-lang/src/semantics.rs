@@ -231,7 +231,7 @@ impl Checker<'_> {
     }
     fn scalar(&mut self, expr: &mut Expr, expected: Option<Type>) -> Result<Type, Diagnostic> {
         let ty = self.expr(expr, expected)?;
-        if ty.aggregate() {
+        if ty.aggregate() || ty.dyn_array() {
             return Err(self.error(&expr.span, "expected a scalar value, found aggregate"));
         }
         Ok(ty)
