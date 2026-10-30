@@ -22,6 +22,31 @@ fn escape_tsv(value: &str) -> String {
         .replace('\n', "\\n")
 }
 
+fn redacted_result(value: &str) -> String {
+    let safe = matches!(
+        value,
+        "pending"
+            | "saved"
+            | "save-error"
+            | "canceled"
+            | "inspected"
+            | "inspect-error"
+            | "key-read"
+            | "key-read-and-saved"
+            | "key-read-error"
+            | "scheduled"
+            | "ok"
+            | "runner-error"
+    ) || value
+        .strip_prefix("exit:")
+        .is_some_and(|code| code.parse::<i32>().is_ok());
+    if safe {
+        value.to_owned()
+    } else {
+        parameter_hash(value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capability {
     ReadWorkspace,
@@ -186,7 +211,7 @@ impl PermissionLedger {
                 entry.parameters_hash,
                 entry.decision.as_str(),
                 parameter_hash(&entry.reason),
-                escape_tsv(&entry.result),
+                escape_tsv(&redacted_result(&entry.result)),
                 entry.duration.as_millis()
             );
         }
@@ -352,5 +377,22 @@ mod tests {
             ledger.entries()[0].request_id,
             ledger.entries()[1].request_id
         );
+    }
+
+    #[test]
+    fn redacted_export_hashes_unrecognized_results() {
+        let mut ledger = PermissionLedger::default();
+        let id = ledger.request(
+            "test",
+            Capability::InspectFile,
+            "fixture",
+            "hash64:x",
+            Decision::Allow,
+            "ok",
+        );
+        assert!(ledger.finish(id, "secret result with path", Duration::ZERO));
+        let export = ledger.redacted_tsv();
+        assert!(!export.contains("secret result"));
+        assert!(export.contains("hash64:"));
     }
 }
