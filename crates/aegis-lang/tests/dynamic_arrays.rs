@@ -32,14 +32,17 @@ fn dynamic_arrays_preserve_scalar_type_rules_and_place_safety() {
 
 #[test]
 fn dynamic_array_comparison_is_rejected_before_codegen() {
-    let source = "fn main() { let a:[i64]=[1]; let b:[i64]=[1]; if(a==b) {} }";
-    let error = compile(source).expect_err("dynamic array comparison");
-    assert!(
-        error
-            .message
-            .contains("expected a scalar value, found aggregate")
-    );
-    assert_eq!(error, analyze(source).expect_err("frontend parity"));
+    for operator in ["==", "!=", "<", ">", "<=", ">="] {
+        let source =
+            format!("fn main() {{ let a:[i64]=[1]; let b:[i64]=[1]; if(a{operator}b) {{}} }}");
+        let error = compile(&source).expect_err("dynamic array comparison");
+        assert!(
+            error
+                .message
+                .contains("expected a scalar value, found aggregate")
+        );
+        assert_eq!(error, analyze(&source).expect_err("frontend parity"));
+    }
 }
 
 #[test]
