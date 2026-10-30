@@ -31,6 +31,18 @@ fn dynamic_arrays_preserve_scalar_type_rules_and_place_safety() {
 }
 
 #[test]
+fn dynamic_array_comparison_is_rejected_before_codegen() {
+    let source = "fn main() { let a:[i64]=[1]; let b:[i64]=[1]; if(a==b) {} }";
+    let error = compile(source).expect_err("dynamic array comparison");
+    assert!(
+        error
+            .message
+            .contains("expected a scalar value, found aggregate")
+    );
+    assert_eq!(error, analyze(source).expect_err("frontend parity"));
+}
+
+#[test]
 fn dynamic_places_work_inside_value_aggregates_and_modules() {
     for source in [
         "struct Bag { a: [str] } fn main() { let b = Bag { a: [\"x\"] };
