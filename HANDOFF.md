@@ -988,3 +988,5 @@ reason заменяются hash64, а параметры уже хранятс�
 Инспекция завершает запись как `inspected` или `inspect-error`; сохранение — как
 `saved`, `save-error` или `canceled`. После тега дополнительные исправления
 инспекции находятся в `main` и требуют следующего prerelease-тега.
+
+Для публикации следующего prerelease используется 	ools/publish_release.ps1 -Tag vX.Y.Z-alpha.N -Build: скрипт проверяет четыре asset-файла, пересоздаёт SHA256SUMS.txt, создаёт GitHub prerelease через API и загружает бинарники без сохранения токена в файлах.
