@@ -1025,3 +1025,7 @@ GitHub Actions workflow .github/workflows/release.yml автоматически
 семантика отклоняет `P == P` диагностикой `expected a scalar value, found
 aggregate`, а IDE и CLI возвращают одинаковый span и текст ошибки. Реализация
 рекурсивного сравнения полей остаётся отдельным следующим этапом.
+
+Regression для динамических массивов закрыт в `fd5b61a`: scalar-проверка теперь
+учитывает `dyn_array()` наряду с фиксированными aggregate. Поэтому `[i64] ==
+[i64]` также отклоняется до codegen и не сравнивает heap-backed указатели.
