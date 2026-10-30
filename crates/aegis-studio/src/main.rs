@@ -285,6 +285,14 @@ impl Studio {
     }
     fn open_path(&mut self, path: PathBuf) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let audit_id = self.permission_ledger.request(
+            "studio",
+            permissions::Capability::ReadWorkspace,
+            &path.display().to_string(),
+            &permissions::parameter_hash(&path.display().to_string()),
+            permissions::Decision::Allow,
+            "user opened source file",
+        );
         if let Some(index) = self
             .docs
             .iter()
@@ -292,11 +300,19 @@ impl Studio {
         {
             self.active = index;
             self.remember_entry(&path);
+            self.permission_ledger
+                .finish(audit_id, "already-open", Duration::ZERO);
             return;
         }
         match storage::read_bounded(&path, aegis_lang::MAX_SOURCE + codec::OVERHEAD) {
-            Err(e) => self.fail(e.to_string()),
+            Err(e) => {
+                self.permission_ledger
+                    .finish(audit_id, "read-error", Duration::ZERO);
+                self.fail(e.to_string())
+            }
             Ok(bytes) if codec::is_protected(&bytes) => {
+                self.permission_ledger
+                    .finish(audit_id, "protected-pending-unlock", Duration::ZERO);
                 self.unlock = Some(Unlock {
                     action: ProtectedAction::Open(path, Zeroizing::new(bytes)),
                     key_path: None,
@@ -305,13 +321,21 @@ impl Studio {
                 })
             }
             Ok(bytes) if bytes.starts_with(b"AEG0") => {
+                self.permission_ledger
+                    .finish(audit_id, "legacy-rejected", Duration::ZERO);
                 self.fail("Legacy AEG0 must first be decoded using the legacy prototype.")
             }
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) if text.len() <= aegis_lang::MAX_SOURCE && !text.contains('\0') => {
+                    self.permission_ledger
+                        .finish(audit_id, "opened", Duration::ZERO);
                     self.add_opened(path, text, false)
                 }
-                _ => self.fail("Expected UTF-8 text without NUL bytes, at most 1 MiB."),
+                _ => {
+                    self.permission_ledger
+                        .finish(audit_id, "invalid-source", Duration::ZERO);
+                    self.fail("Expected UTF-8 text without NUL bytes, at most 1 MiB.")
+                }
             },
         }
     }
