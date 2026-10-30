@@ -24,7 +24,7 @@ jobs:
       - name: Install Rust
         shell: pwsh
         run: |
-          rustup toolchain install 1.96.1 --profile minimal --component rustfmt --component clippy
+          rustup toolchain install 1.96.1 --profile minimal --component rustfmt --component clippy --no-self-update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustup default 1.96.1
       - name: Check and test
