@@ -71,11 +71,13 @@ foreach ($asset in $assets) {
         if ($statusCode -ne 422) {
             throw
         }
-        $existing = Invoke-RestMethod -Method Get -Uri ($release.assets_url) -Headers $headers |
-            Where-Object { $_.name -eq $asset }
+        $matches = @(
+            Invoke-RestMethod -Method Get -Uri ([string]$release.assets_url) -Headers $headers |
+                Where-Object { $_.name -eq $asset }
+        )
+        $existing = $matches | Select-Object -First 1
         if ($null -eq $existing) { throw }
-        Invoke-RestMethod -Method Delete -Uri $existing.url -Headers $headers | Out-Null
-        Invoke-RestMethod -Method Post -Uri $uri -Headers $assetHeaders -InFile (Join-Path $root $asset) | Out-Null
+        Write-Output ("Asset already exists; keeping " + $asset)
     }
 }
 Write-Output $release.html_url
