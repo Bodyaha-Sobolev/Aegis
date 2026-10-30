@@ -1456,6 +1456,14 @@ impl Studio {
             });
         });
         if action == 2 {
+            if let Some(request_id) = self.active_save_permission.take() {
+                let duration = self
+                    .active_save_started
+                    .take()
+                    .map_or(Duration::ZERO, |started| started.elapsed());
+                self.permission_ledger
+                    .finish(request_id, "canceled", duration);
+            }
             self.unlock = None;
             self.close_after_save = None;
             self.quit = false;
