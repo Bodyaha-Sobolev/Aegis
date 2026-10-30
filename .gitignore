@@ -17,3 +17,6 @@ __pycache__/
 /t3.ae
 /t3out.aeg
 /t3rest.ae
+
+# User-provided reference trees; keep out of the repository
+/LAUN-OTHER/

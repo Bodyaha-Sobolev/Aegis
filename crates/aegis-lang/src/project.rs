@@ -1,8 +1,7 @@
 //! Bounded source loading and source maps shared by CLI and Studio.
 use crate::{
-    Build, Diagnostic, MAX_SOURCE,
     lexer::{self, Keyword, Kind},
-    storage,
+    storage, Build, Diagnostic, MAX_SOURCE,
 };
 use std::{
     collections::HashSet,
@@ -12,6 +11,43 @@ use std::{
 use zeroize::Zeroizing;
 
 pub const MAX_FILES: usize = 64;
+/// Returns a deterministic fingerprint for an entry and its in-memory overlays.
+/// The fingerprint is suitable for IDE invalidation and never includes plaintext
+/// outside the bounded project inputs.
+pub fn fingerprint(entry: &Path, source: &str, overlays: &[Overlay]) -> Result<u64, Diagnostic> {
+    if source.len() > MAX_SOURCE {
+        return Err(Diagnostic::new(source, 0..0, "entry source exceeds 1 MiB"));
+    }
+    if overlays.len() > MAX_FILES {
+        return Err(Diagnostic::new(source, 0..0, "overlay limit exceeded (64)"));
+    }
+    let entry =
+        normalize(entry).map_err(|error| Diagnostic::new(source, 0..0, error.to_string()))?;
+    let mut hash = 0xcbf29ce484222325u64;
+    fn feed(hash: &mut u64, bytes: &[u8]) {
+        for byte in bytes {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    feed(&mut hash, entry.as_os_str().to_string_lossy().as_bytes());
+    feed(&mut hash, &[0]);
+    feed(&mut hash, source.as_bytes());
+    let mut paths: Vec<_> = overlays
+        .iter()
+        .map(|overlay| overlay.path.clone())
+        .collect();
+    paths.sort();
+    for path in paths {
+        feed(&mut hash, path.as_os_str().to_string_lossy().as_bytes());
+        feed(&mut hash, &[0]);
+        if let Some(overlay) = overlays.iter().find(|overlay| overlay.path == path) {
+            feed(&mut hash, overlay.text.as_bytes());
+        }
+        feed(&mut hash, &[0xff]);
+    }
+    Ok(hash)
+}
 
 /// An owned editor snapshot. Plaintext is cleared when the snapshot is dropped.
 pub struct Overlay {
