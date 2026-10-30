@@ -1,0 +1,50 @@
+name: Publish Aegis prerelease
+
+on:
+  push:
+    tags:
+      - 'v*.*.*-alpha.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.96.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default 1.96.1
+      - name: Build release binaries
+        shell: cmd
+        run: build.cmd
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          $lines = @(
+            "{0}  aegis.exe" -f (Get-FileHash aegis.exe -Algorithm SHA256).Hash,
+            "{0}  aegis-cli.exe" -f (Get-FileHash aegis-cli.exe -Algorithm SHA256).Hash,
+            "{0}  THIRD_PARTY_NOTICES.txt" -f (Get-FileHash THIRD_PARTY_NOTICES.txt -Algorithm SHA256).Hash
+          )
+          Set-Content SHA256SUMS.txt -Value $lines -Encoding ascii
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" aegis.exe aegis-cli.exe SHA256SUMS.txt THIRD_PARTY_NOTICES.txt `
+            --repo "${{ github.repository }}" `
+            --title "Aegis ${{ github.ref_name }}" `
+            --generate-notes `
+            --prerelease
