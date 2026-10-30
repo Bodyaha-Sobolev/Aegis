@@ -110,6 +110,8 @@ struct Studio {
     project_entry: Option<PathBuf>,
     analysis_stamp: Option<editor_project::Stamp>,
     permission_ledger: permissions::PermissionLedger,
+    active_key_permission: Option<u64>,
+    active_key_started: Option<Instant>,
     active_inspect_permission: Option<u64>,
     active_inspect_started: Option<Instant>,
     active_save_permission: Option<u64>,
@@ -160,6 +162,8 @@ impl Default for Studio {
             project_entry: None,
             analysis_stamp: None,
             permission_ledger: permissions::PermissionLedger::default(),
+            active_key_permission: None,
+            active_key_started: None,
             active_inspect_permission: None,
             active_inspect_started: None,
             active_save_permission: None,
@@ -617,6 +621,18 @@ impl Studio {
                     result,
                 } => {
                     self.busy = false;
+                    if let Some(request_id) = self.active_key_permission.take() {
+                        let outcome = if result.is_ok() {
+                            "key-read-and-saved"
+                        } else {
+                            "key-read-error"
+                        };
+                        let duration = self
+                            .active_key_started
+                            .take()
+                            .map_or(Duration::ZERO, |started| started.elapsed());
+                        self.permission_ledger.finish(request_id, outcome, duration);
+                    }
                     if let Some(request_id) = self.active_save_permission.take() {
                         let result = if result.is_ok() {
                             "saved"
@@ -659,6 +675,18 @@ impl Studio {
                 }
                 Event::Opened(path, result) => {
                     self.busy = false;
+                    if let Some(request_id) = self.active_key_permission.take() {
+                        let outcome = if result.is_ok() {
+                            "key-read"
+                        } else {
+                            "key-read-error"
+                        };
+                        let duration = self
+                            .active_key_started
+                            .take()
+                            .map_or(Duration::ZERO, |started| started.elapsed());
+                        self.permission_ledger.finish(request_id, outcome, duration);
+                    }
                     match result {
                         Ok(text) => self.add_opened(path, text, true),
                         Err(e) => self.fail(e),
@@ -1503,6 +1531,16 @@ impl Studio {
             unlock.error = Some("Choose a key file".into());
             return;
         };
+        let key_target = key_path.display().to_string();
+        self.active_key_permission = Some(self.permission_ledger.request(
+            "studio",
+            permissions::Capability::ReadWorkspace,
+            &key_target,
+            &permissions::parameter_hash(&key_target),
+            permissions::Decision::Allow,
+            "user selected protected-source key",
+        ));
+        self.active_key_started = Some(Instant::now());
         let Some(unlock) = self.unlock.take() else {
             return;
         };
