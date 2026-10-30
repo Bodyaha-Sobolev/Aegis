@@ -32,11 +32,34 @@ pub(crate) enum Capability {
     LoadFfi,
 }
 
+impl Capability {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadWorkspace => "read_workspace",
+            Self::WriteWorkspace => "write_workspace",
+            Self::RunOwnedChild => "run_owned_child",
+            Self::InspectFile => "inspect_file",
+            Self::NetworkRequest => "network_request",
+            Self::LoadFfi => "load_ffi",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Decision {
     Allow,
     Deny,
     Cancel,
+}
+
+impl Decision {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Cancel => "cancel",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,10 +154,10 @@ impl PermissionLedger {
                 entry.request_id,
                 entry.timestamp_ms,
                 parameter_hash(&entry.actor),
-                entry.capability,
+                entry.capability.as_str(),
                 parameter_hash(&entry.target),
                 entry.parameters_hash,
-                entry.decision,
+                entry.decision.as_str(),
                 parameter_hash(&entry.reason),
                 escape_tsv(&entry.result),
                 entry.duration.as_millis()
@@ -240,5 +263,12 @@ mod tests {
         let export = ledger.redacted_tsv();
         assert_eq!(export.lines().count(), 2);
         assert!(export.contains("line one\\nline two\\tcolumn"));
+    }
+
+    #[test]
+    fn capability_and_decision_names_are_stable() {
+        assert_eq!(Capability::RunOwnedChild.as_str(), "run_owned_child");
+        assert_eq!(Capability::LoadFfi.as_str(), "load_ffi");
+        assert_eq!(Decision::Cancel.as_str(), "cancel");
     }
 }
