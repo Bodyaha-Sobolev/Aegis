@@ -110,6 +110,8 @@ struct Studio {
     project_entry: Option<PathBuf>,
     analysis_stamp: Option<editor_project::Stamp>,
     permission_ledger: permissions::PermissionLedger,
+    active_inspect_permission: Option<u64>,
+    active_inspect_started: Option<Instant>,
     active_save_permission: Option<u64>,
     active_save_started: Option<Instant>,
     active_run_permission: Option<u64>,
@@ -158,6 +160,8 @@ impl Default for Studio {
             project_entry: None,
             analysis_stamp: None,
             permission_ledger: permissions::PermissionLedger::default(),
+            active_inspect_permission: None,
+            active_inspect_started: None,
             active_save_permission: None,
             active_save_started: None,
             active_run_permission: None,
@@ -226,6 +230,8 @@ impl Studio {
             "user requested binary inspection",
         );
         self.inspecting = true;
+        self.active_inspect_permission = Some(request_id);
+        self.active_inspect_started = Some(Instant::now());
         self.status = "Inspecting binary…".into();
         let sender = self.sender.clone();
         std::thread::spawn(move || {
@@ -239,8 +245,6 @@ impl Studio {
             let _ = sender.send(Event::Inspected(path, result));
             ctx.request_repaint();
         });
-        self.permission_ledger
-            .finish(request_id, "scheduled", Duration::ZERO);
     }
     fn fail(&mut self, error: impl AsRef<str>) {
         self.status = "Operation failed".into();
@@ -508,6 +512,18 @@ impl Studio {
             match event {
                 Event::Inspected(path, result) => {
                     self.inspecting = false;
+                    if let Some(request_id) = self.active_inspect_permission.take() {
+                        let outcome = if result.is_ok() {
+                            "inspected"
+                        } else {
+                            "inspect-error"
+                        };
+                        let duration = self
+                            .active_inspect_started
+                            .take()
+                            .map_or(Duration::ZERO, |started| started.elapsed());
+                        self.permission_ledger.finish(request_id, outcome, duration);
+                    }
                     match result {
                         Ok((image, bytes)) => {
                             let mut inspector = inspector::Inspector::new(path, image, bytes);
