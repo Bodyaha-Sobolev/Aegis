@@ -109,6 +109,12 @@ struct Studio {
     inspecting: bool,
     project_entry: Option<PathBuf>,
     analysis_stamp: Option<editor_project::Stamp>,
+    analysis_cache: Option<(
+        editor_project::Stamp,
+        u64,
+        u64,
+        Result<Vec<FunctionInfo>, Diagnostic>,
+    )>,
     permission_ledger: permissions::PermissionLedger,
     active_key_permission: Option<u64>,
     active_key_started: Option<Instant>,
@@ -161,6 +167,7 @@ impl Default for Studio {
             inspecting: false,
             project_entry: None,
             analysis_stamp: None,
+            analysis_cache: None,
             permission_ledger: permissions::PermissionLedger::default(),
             active_key_permission: None,
             active_key_started: None,
@@ -556,6 +563,7 @@ impl Studio {
                         .iter_mut()
                         .find(|d| d.id == id && d.revision == revision)
                     {
+                        self.analysis_cache = Some((stamp, id, revision, result.clone()));
                         match result {
                             Ok(functions) => {
                                 doc.functions = functions;
@@ -752,6 +760,16 @@ impl Studio {
         self.analyzing = true;
         let id = doc.id;
         let revision = doc.revision;
+        if let Some((cached_stamp, cached_id, cached_revision, cached_result)) =
+            &self.analysis_cache
+            && cached_stamp == &stamp
+            && *cached_id == id
+            && *cached_revision == revision
+        {
+            self.analyzing = false;
+            self.apply_analysis(id, revision, cached_result.clone());
+            return;
+        }
         let snapshot =
             match editor_project::Snapshot::new(&self.docs, self.active, &self.project_entry) {
                 Ok(snapshot) => snapshot,
@@ -774,6 +792,30 @@ impl Studio {
             let result = snapshot.compile().map(|build| build.functions);
             let _ = events.send(Event::Analyzed(id, revision, stamp, result));
         });
+    }
+
+    fn apply_analysis(
+        &mut self,
+        id: u64,
+        revision: u64,
+        result: Result<Vec<FunctionInfo>, Diagnostic>,
+    ) {
+        if let Some(doc) = self
+            .docs
+            .iter_mut()
+            .find(|doc| doc.id == id && doc.revision == revision)
+        {
+            match result {
+                Ok(functions) => {
+                    doc.functions = functions;
+                    doc.diagnostic = None;
+                }
+                Err(error) => {
+                    doc.functions.clear();
+                    doc.diagnostic = Some(error);
+                }
+            }
+        }
     }
     fn find_next(&mut self) {
         if self.find.is_empty() {
