@@ -1,47 +1,48 @@
-//! Sentinel visual system: DeepSeek-inspired blue-on-near-black palette with a
-//! slowly drifting "living" background, system typography and shared widgets.
+//! Sentinel visual system: the light DeepSeek landing palette — near-white
+//! base, soft periwinkle-blue clouds and a faint grid — plus system
+//! typography and shared widgets.
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontId, Margin, Rect, Stroke, Vec2,
 };
 
 // Palette -----------------------------------------------------------------
-/// Near-black blue base behind everything; the living blobs drift on it.
-pub const BG: Color32 = Color32::from_rgb(11, 14, 22);
+/// Near-white base behind everything; the blue clouds drift on it.
+pub const BG: Color32 = Color32::from_rgb(243, 245, 249);
 /// Panels sit slightly translucent so the living background stays visible.
 fn panel_translucent() -> Color32 {
-    Color32::from_rgba_unmultiplied(16, 21, 31, 230)
+    Color32::from_rgba_unmultiplied(252, 253, 255, 235)
 }
 /// Elevated cards, toolbars, popups.
-pub const RAISED: Color32 = Color32::from_rgb(22, 29, 43);
+pub const RAISED: Color32 = Color32::from_rgb(255, 255, 255);
 /// Hover fill on quiet controls.
-pub const HOVER: Color32 = Color32::from_rgb(29, 38, 55);
+pub const HOVER: Color32 = Color32::from_rgb(237, 240, 246);
 /// Active/pressed fill.
-pub const ACTIVE: Color32 = Color32::from_rgb(35, 46, 66);
+pub const ACTIVE: Color32 = Color32::from_rgb(226, 232, 243);
 /// DeepSeek blue accent (#4d6bfe).
 pub const ACCENT: Color32 = Color32::from_rgb(77, 107, 254);
 /// Accent on hover (#5686fe).
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(86, 134, 254);
-/// Dim accent for soft fills and selection.
-pub const ACCENT_DIM: Color32 = Color32::from_rgb(46, 63, 143);
+/// Soft accent tint for selection and quiet accent fills.
+pub const ACCENT_DIM: Color32 = Color32::from_rgb(214, 226, 255);
 /// Secondary gradient stop for brand marks and primary buttons.
 pub const ACCENT_VIOLET: Color32 = Color32::from_rgb(124, 92, 255);
-/// Text hierarchy.
-pub const TEXT: Color32 = Color32::from_rgb(234, 238, 246);
-pub const TEXT_2: Color32 = Color32::from_rgb(154, 165, 184);
-pub const TEXT_3: Color32 = Color32::from_rgb(94, 107, 128);
-pub const DANGER: Color32 = Color32::from_rgb(244, 104, 126);
-pub const WARNING: Color32 = Color32::from_rgb(232, 179, 106);
-pub const OK: Color32 = Color32::from_rgb(82, 208, 165);
+/// Text hierarchy — the exact alias values from DeepSeek desktop CSS.
+pub const TEXT: Color32 = Color32::from_rgb(15, 17, 21);
+pub const TEXT_2: Color32 = Color32::from_rgb(97, 102, 107);
+pub const TEXT_3: Color32 = Color32::from_rgb(129, 133, 140);
+pub const DANGER: Color32 = Color32::from_rgb(209, 36, 47);
+pub const WARNING: Color32 = Color32::from_rgb(154, 103, 0);
+pub const OK: Color32 = Color32::from_rgb(26, 127, 55);
 /// Editor line numbers.
-pub const GUTTER: Color32 = Color32::from_rgb(61, 72, 89);
+pub const GUTTER: Color32 = Color32::from_rgb(176, 183, 195);
 
 pub fn border() -> Stroke {
-    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 20))
+    Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 26))
 }
 
 pub fn border_strong() -> Stroke {
-    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 38))
+    Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 41))
 }
 
 // Typography --------------------------------------------------------------
@@ -121,15 +122,15 @@ pub fn install(ctx: &egui::Context) {
     }
     ctx.set_fonts(fonts);
 
-    let mut visuals = egui::Visuals::dark();
+    let mut visuals = egui::Visuals::light();
     visuals.panel_fill = panel_translucent();
     visuals.window_fill = RAISED;
-    // The editor surface is a touch translucent so the drift is visible in code view.
-    visuals.extreme_bg_color = Color32::from_rgba_unmultiplied(11, 14, 22, 214);
-    visuals.faint_bg_color = RAISED;
+    // The editor surface is a touch translucent so the clouds stay visible.
+    visuals.extreme_bg_color = Color32::from_rgba_unmultiplied(245, 246, 250, 178);
+    visuals.faint_bg_color = Color32::from_rgb(240, 242, 247);
     visuals.selection.bg_fill = ACCENT_DIM;
-    visuals.selection.stroke.color = TEXT;
-    visuals.hyperlink_color = ACCENT_HOVER;
+    visuals.selection.stroke.color = ACCENT;
+    visuals.hyperlink_color = ACCENT;
     visuals.window_corner_radius = CornerRadius::same(12);
     visuals.menu_corner_radius = CornerRadius::same(10);
     for state in [
@@ -145,12 +146,15 @@ pub fn install(ctx: &egui::Context) {
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_2);
     visuals.widgets.noninteractive.bg_stroke = border();
     visuals.widgets.inactive.bg_fill = HOVER;
+    visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
     visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     visuals.widgets.hovered.bg_fill = ACTIVE;
+    visuals.widgets.hovered.weak_bg_fill = HOVER;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.hovered.bg_stroke = border_strong();
+    visuals.widgets.hovered.bg_stroke = border();
     visuals.widgets.active.bg_fill = ACCENT_DIM;
+    visuals.widgets.active.weak_bg_fill = ACTIVE;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT);
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
     ctx.set_visuals(visuals);
@@ -226,34 +230,67 @@ fn glow(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Slow ambient washes pinned near the corners, like the DeepSeek hero:
-/// a navy-blue glow top-left, a violet one bottom-right and a faint teal
-/// touch on the right edge. The whole field drifts almost imperceptibly.
+/// The DeepSeek landing background: near-white base, a faint square grid and
+/// large soft periwinkle-blue clouds concentrated in the upper half, all
+/// drifting almost imperceptibly.
 pub fn blobs(painter: &egui::Painter, rect: Rect, time: f32) {
     painter.rect_filled(rect, 0.0, BG);
-    let drift = Vec2::new((time * 0.05).cos(), (time * 0.05).sin() * 0.6)
-        * rect.height().min(rect.width())
-        * 0.04;
+    // Faint square grid over the whole surface.
+    let cell = 88.0;
+    let grid = Color32::from_rgba_unmultiplied(15, 17, 21, 12);
+    let mut x = rect.left() + cell;
+    while x < rect.right() {
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            Stroke::new(1.0, grid),
+        );
+        x += cell;
+    }
+    let mut y = rect.top() + cell;
+    while y < rect.bottom() {
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            Stroke::new(1.0, grid),
+        );
+        y += cell;
+    }
     let w = rect.width();
     let h = rect.height();
-    glow(
-        painter,
-        rect.left_top() + egui::vec2(w * 0.2, h * 0.12) + drift,
-        h * 1.05,
-        Color32::from_rgba_unmultiplied(61, 90, 220, 52),
-    );
-    glow(
-        painter,
-        rect.right_bottom() - egui::vec2(w * 0.16, h * 0.14) - drift,
-        h * 1.1,
-        Color32::from_rgba_unmultiplied(94, 70, 200, 40),
-    );
-    glow(
-        painter,
-        rect.right_top() + egui::vec2(-w * 0.1, h * 0.4),
-        h * 0.7,
-        Color32::from_rgba_unmultiplied(47, 191, 166, 26),
-    );
+    let drift = Vec2::new((time * 0.05).cos(), (time * 0.05).sin() * 0.6) * h * 0.035;
+    let clouds = [
+        (
+            0.38,
+            0.16,
+            1.15,
+            Color32::from_rgba_unmultiplied(169, 187, 227, 132),
+        ),
+        (
+            0.08,
+            0.52,
+            0.9,
+            Color32::from_rgba_unmultiplied(159, 178, 221, 106),
+        ),
+        (
+            0.86,
+            0.18,
+            1.0,
+            Color32::from_rgba_unmultiplied(174, 191, 230, 118),
+        ),
+        (
+            0.56,
+            0.48,
+            1.15,
+            Color32::from_rgba_unmultiplied(198, 210, 236, 82),
+        ),
+    ];
+    for (fx, fy, fr, color) in clouds {
+        glow(
+            painter,
+            egui::pos2(rect.left() + w * fx, rect.top() + h * fy) + drift,
+            h * fr,
+            color,
+        );
+    }
 }
 
 // Gradient painting --------------------------------------------------------
@@ -352,10 +389,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn palette_is_dark_and_layered() {
-        assert!(BG.r() < 30 && BG.g() < 30 && BG.b() < 40);
-        assert!(panel_translucent().r() > BG.r());
-        assert!(RAISED.r() > panel_translucent().r());
+    fn palette_is_light_and_layered() {
+        assert!(BG.r() > 240 && BG.g() > 240 && BG.b() > 244);
+        assert!(RAISED.r() == 255, "panels and cards are pure white");
+        assert!(TEXT.r() < 30, "dark text on the light surface");
         assert!(ACCENT.b() > 200, "DeepSeek-style blue");
     }
 }
