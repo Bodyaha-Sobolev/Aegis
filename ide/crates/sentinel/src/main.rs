@@ -5,10 +5,12 @@ mod disassembly;
 mod document;
 mod editor_project;
 mod highlighting;
+mod icons;
 mod inspector;
 mod navigation;
 mod permissions;
 mod runner;
+mod theme;
 
 use aegis_lang::{Diagnostic, FunctionInfo, codec, storage};
 use document::Document;
@@ -26,8 +28,7 @@ use zeroize::Zeroizing;
 
 const SAMPLE: &str = include_str!("../assets/sample.ae");
 const OUTPUT_LIMIT: usize = 1024 * 1024;
-const ACCENT: Color32 = Color32::from_rgb(116, 218, 193);
-const MUTED: Color32 = Color32::from_rgb(137, 151, 171);
+const MUTED: Color32 = theme::TEXT_2;
 
 enum Event {
     Analyzed(u64, u64, editor_project::Stamp, AnalysisOutcome),
@@ -74,6 +75,15 @@ type AnalysisOutcome = Result<Vec<FunctionInfo>, Diagnostic>;
 enum BottomTab {
     Output,
     Problems,
+}
+
+/// Content of the left icon rail / side panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Activity {
+    Explorer,
+    Symbols,
+    Problems,
+    Audit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -270,8 +280,8 @@ struct Studio {
     active_save_started: Option<Instant>,
     active_run_permission: Option<u64>,
     active_run_started: Option<Instant>,
-    audit_open: bool,
     bottom_tab: BottomTab,
+    activity: Activity,
     completion: Option<CompletionState>,
     palette: Option<(String, usize)>,
 }
@@ -326,8 +336,8 @@ impl Default for Studio {
             active_save_started: None,
             active_run_permission: None,
             active_run_started: None,
-            audit_open: false,
             bottom_tab: BottomTab::Output,
+            activity: Activity::Explorer,
             completion: None,
             palette: None,
         }
@@ -335,21 +345,7 @@ impl Default for Studio {
 }
 impl Studio {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = Color32::from_rgb(19, 25, 34);
-        visuals.window_fill = Color32::from_rgb(25, 32, 43);
-        visuals.extreme_bg_color = Color32::from_rgb(14, 19, 27);
-        visuals.selection.bg_fill = Color32::from_rgb(48, 88, 91);
-        visuals.selection.stroke.color = Color32::WHITE;
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(34, 43, 56);
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 62, 75);
-        cc.egui_ctx.set_visuals(visuals);
-        cc.egui_ctx.style_mut(|s| {
-            s.spacing.item_spacing = Vec2::new(10.0, 8.0);
-            s.spacing.button_padding = Vec2::new(13.0, 7.0);
-            s.text_styles
-                .insert(egui::TextStyle::Monospace, FontId::monospace(15.0));
-        });
+        theme::install(&cc.egui_ctx);
         let mut app = Self::default();
         let args: Vec<_> = std::env::args_os().skip(1).collect();
         if args
@@ -1275,7 +1271,7 @@ impl Studio {
                     self.inspect_binary(path, ctx.clone());
                 }
             }
-            Command::Audit => self.audit_open = true,
+            Command::Audit => self.activity = Activity::Audit,
             Command::Licenses => self.licenses_open = true,
             Command::UseAsEntry => {
                 self.project_entry = self.docs.get(self.active).and_then(|doc| doc.path.clone());
@@ -1401,6 +1397,15 @@ impl Studio {
         }
     }
     fn show(&mut self, ctx: &egui::Context) {
+        // Headless tests render through show() without Studio::new(): make sure
+        // the named text styles exist before any RichText references them.
+        if !ctx
+            .style()
+            .text_styles
+            .contains_key(&egui::TextStyle::Name("Brand".into()))
+        {
+            theme::install(ctx);
+        }
         // Test-only command-line mode exercises an actual native GPU window and
         // optionally captures that window's own rendered frame, without input.
         if let Some(frames) = &mut self.smoke_frames {
@@ -1459,33 +1464,33 @@ impl Studio {
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         egui::TopBottomPanel::top("toolbar")
-            .exact_height(62.0)
+            .exact_height(56.0)
             .show(ctx, |ui| {
-                ui.add_space(9.0);
+                ui.add_space(7.0);
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("S E N T I N E L")
-                            .size(22.0)
-                            .strong()
-                            .color(ACCENT),
-                    );
-                    ui.label(RichText::new("AEGIS IDE").size(11.0).color(MUTED));
-                    ui.separator();
-                    if ui.button("New").on_hover_text("Ctrl+N").clicked() {
+                    let (mark, _) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::hover());
+                    theme::brand_mark(ui.painter(), mark);
+                    ui.vertical(|ui| {
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("SENTINEL")
+                                .text_style(egui::TextStyle::Name("Brand".into()))
+                                .strong()
+                                .color(theme::TEXT),
+                        );
+                        ui.label(theme::caption("AEGIS IDE").color(theme::TEXT_3));
+                    });
+                    ui.add_space(4.0);
+                    if Self::icon_button(ui, icons::plus, "New tab  (Ctrl+N)").clicked() {
                         self.new_doc();
                     }
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("Open"))
-                        .on_hover_text("Ctrl+O")
-                        .clicked()
+                    if !self.busy
+                        && Self::icon_button(ui, icons::folder, "Open file  (Ctrl+O)").clicked()
                     {
                         self.open_dialog();
                     }
                     let id = self.docs.get(self.active).map(|d| d.id);
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("Save"))
-                        .on_hover_text("Ctrl+S")
-                        .clicked()
+                    if Self::icon_button(ui, icons::save, "Save  (Ctrl+S)").clicked()
                         && let Some(id) = id
                     {
                         self.save(id, false, false);
@@ -1544,45 +1549,37 @@ impl Studio {
                             ui.close();
                         }
                     });
-                    if ui
-                        .button(
-                            RichText::new(format!("Audit {}", self.permission_ledger.len()))
-                                .size(11.0)
-                                .color(MUTED),
-                        )
-                        .on_hover_text("Открыть журнал разрешённых действий IDE")
-                        .clicked()
-                    {
-                        self.audit_open = true;
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some((_, stop)) = &self.run {
                             if ui
-                                .button(
-                                    RichText::new("Stop").color(Color32::from_rgb(249, 131, 142)),
+                                .add(
+                                    egui::Button::new(RichText::new("Stop").color(theme::DANGER))
+                                        .corner_radius(16.0)
+                                        .fill(theme::RAISED)
+                                        .stroke(theme::border_strong()),
                                 )
+                                .on_hover_text("Stop the running program")
                                 .clicked()
                             {
                                 stop.store(true, Ordering::Relaxed);
                             }
-                        } else if ui
-                            .add_enabled(
-                                !self.busy,
-                                egui::Button::new(
-                                    RichText::new("Run  F5").color(Color32::from_rgb(15, 30, 29)),
-                                )
-                                .fill(ACCENT),
-                            )
-                            .clicked()
+                        } else if !self.busy
+                            && theme::gradient_button(ui, "Run  F5", Some(icons::play)).clicked()
                         {
                             self.build(true);
                         }
-                        if ui
-                            .add_enabled(
-                                !self.busy && self.run.is_none(),
-                                egui::Button::new("Build  F6"),
-                            )
-                            .clicked()
+                        if !self.busy
+                            && self.run.is_none()
+                            && ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Build  F6").color(theme::TEXT_2),
+                                    )
+                                    .corner_radius(16.0)
+                                    .fill(Color32::TRANSPARENT)
+                                    .stroke(theme::border()),
+                                )
+                                .clicked()
                         {
                             self.build(false);
                         }
@@ -1590,39 +1587,69 @@ impl Studio {
                 });
             });
         egui::TopBottomPanel::bottom("status")
-            .exact_height(30.0)
+            .exact_height(28.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new(&self.status).size(12.0).color(MUTED));
+                    ui.add_space(10.0);
+                    let failed =
+                        self.status == "Operation failed" || self.status.starts_with("ERROR");
+                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(
+                        dot.center(),
+                        3.5,
+                        if failed { theme::DANGER } else { theme::OK },
+                    );
+                    ui.label(RichText::new(&self.status).size(12.0).color(theme::TEXT_2));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(10.0);
                         ui.label(
-                            RichText::new("UTF-8  ·  Windows x64")
-                                .size(12.0)
-                                .color(MUTED),
+                            theme::caption(concat!("Sentinel ", env!("CARGO_PKG_VERSION")))
+                                .color(theme::TEXT_3),
                         );
+                        ui.label(RichText::new("·").size(12.0).color(theme::TEXT_3));
+                        ui.label(RichText::new("Windows x64").size(12.0).color(theme::TEXT_3));
+                        ui.label(RichText::new("·").size(12.0).color(theme::TEXT_3));
+                        ui.label(RichText::new("UTF-8").size(12.0).color(theme::TEXT_3));
                         if let Some(doc) = self.docs.get(self.active) {
+                            if doc.protected {
+                                ui.label(
+                                    RichText::new("Protected").size(12.0).color(theme::WARNING),
+                                );
+                                ui.label(RichText::new("·").size(12.0).color(theme::TEXT_3));
+                            }
                             ui.label(
                                 RichText::new(format!("Ln {}, Col {}", doc.cursor.0, doc.cursor.1))
                                     .size(12.0)
-                                    .color(MUTED),
+                                    .color(theme::TEXT_3),
                             );
-                            if doc.protected {
-                                ui.label(
-                                    RichText::new("Protected source").size(12.0).color(ACCENT),
-                                );
-                            }
                         }
                     });
                 });
             });
-        self.sidebar(ctx);
+        self.activity_bar(ctx);
+        self.side_panel(ctx);
         egui::TopBottomPanel::bottom("output").resizable(true).default_height(200.0).min_height(90.0).show(ctx,|ui| {
             ui.horizontal(|ui| {
                 let problems = self.docs.iter().filter(|doc| doc.diagnostic.is_some()).count();
-                if ui.selectable_label(self.bottom_tab == BottomTab::Output, RichText::new("OUTPUT").small().strong().color(MUTED)).clicked() {
+                if ui
+                    .selectable_label(
+                        self.bottom_tab == BottomTab::Output,
+                        RichText::new("OUTPUT").small().strong().color(theme::TEXT_3),
+                    )
+                    .clicked()
+                {
                     self.bottom_tab = BottomTab::Output;
                 }
-                if ui.selectable_label(self.bottom_tab == BottomTab::Problems, RichText::new(format!("PROBLEMS ({problems})")).small().strong().color(if problems == 0 { MUTED } else { Color32::from_rgb(249, 131, 142) })).clicked() {
+                if ui
+                    .selectable_label(
+                        self.bottom_tab == BottomTab::Problems,
+                        RichText::new(format!("PROBLEMS ({problems})"))
+                            .small()
+                            .strong()
+                            .color(if problems == 0 { theme::TEXT_3 } else { theme::DANGER }),
+                    )
+                    .clicked()
+                {
                     self.bottom_tab = BottomTab::Problems;
                 }
                 if self.bottom_tab == BottomTab::Output {
@@ -1642,34 +1669,106 @@ impl Studio {
             }
         });
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ctx.style()).fill(Color32::from_rgb(14, 19, 27)))
+            .frame(egui::Frame::central_panel(&ctx.style()).fill(theme::BG))
             .show(ctx, |ui| {
+                theme::blobs(ui.painter(), ui.max_rect(), ctx.input(|i| i.time) as f32);
                 let mut close = None;
                 egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.add_space(4.0);
                         for (i, doc) in self.docs.iter().enumerate() {
-                            let label = format!(
-                                "{}{}{}",
-                                if doc.protected { "◈ " } else { "" },
-                                doc.title(),
-                                if doc.dirty() { " •" } else { "" }
+                            let active = i == self.active;
+                            let title = doc.title();
+                            let text_width = ui.fonts_mut(|f| {
+                                f.layout_no_wrap(
+                                    title.clone(),
+                                    egui::FontId::proportional(13.5),
+                                    theme::TEXT,
+                                )
+                                .size()
+                                .x
+                            });
+                            let width = (text_width + 46.0).max(104.0);
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(width, 32.0), egui::Sense::click());
+                            let response = response.on_hover_text(doc.path.as_ref().map_or_else(
+                                || "Unsaved buffer".into(),
+                                |p| p.display().to_string(),
+                            ));
+                            let painter = ui.painter();
+                            let shape = egui::CornerRadius {
+                                nw: 9,
+                                ne: 9,
+                                sw: 0,
+                                se: 0,
+                            };
+                            if active {
+                                painter.rect_filled(rect, shape, theme::RAISED);
+                                painter.rect_filled(
+                                    egui::Rect::from_min_size(
+                                        rect.left_bottom() + egui::vec2(9.0, -2.0),
+                                        egui::vec2(rect.width() - 18.0, 2.0),
+                                    ),
+                                    1.0,
+                                    theme::ACCENT,
+                                );
+                            } else if response.hovered() {
+                                painter.rect_filled(rect, shape, theme::HOVER);
+                            }
+                            let mut text_x = rect.left() + 12.0;
+                            if doc.protected {
+                                painter.text(
+                                    egui::pos2(text_x, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    "◈",
+                                    egui::FontId::proportional(13.5),
+                                    theme::ACCENT_VIOLET,
+                                );
+                                text_x += 15.0;
+                            }
+                            painter.text(
+                                egui::pos2(text_x, rect.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                &title,
+                                egui::FontId::proportional(13.5),
+                                if active { theme::TEXT } else { theme::TEXT_2 },
                             );
-                            if ui
-                                .selectable_label(i == self.active, label)
-                                .on_hover_text(doc.path.as_ref().map_or_else(
-                                    || "Unsaved buffer".into(),
-                                    |p| p.display().to_string(),
-                                ))
-                                .clicked()
-                            {
+                            let close_rect = egui::Rect::from_center_size(
+                                egui::pos2(rect.right() - 14.0, rect.center().y),
+                                egui::vec2(17.0, 17.0),
+                            );
+                            let close_response = ui
+                                .interact(
+                                    close_rect,
+                                    Id::new(("tab-close", doc.id)),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_text("Close tab  (Ctrl+W)");
+                            if close_response.hovered() {
+                                painter.rect_filled(close_rect, 5.0, theme::ACTIVE);
+                            }
+                            if close_response.hovered() {
+                                icons::close(painter, close_rect.shrink(4.0), theme::TEXT);
+                            } else if doc.dirty() {
+                                painter.circle_filled(close_rect.center(), 3.0, theme::ACCENT);
+                            } else {
+                                icons::close(painter, close_rect.shrink(4.0), theme::TEXT_3);
+                            }
+                            if close_response.clicked() {
+                                close = Some(doc.id);
+                            }
+                            if response.clicked() {
                                 self.active = i;
                                 self.find_from = 0;
                             }
-                            if ui.small_button("×").on_hover_text("Close tab").clicked() {
-                                close = Some(doc.id);
-                            }
                         }
-                        if ui.small_button("+").clicked() {
+                        let (plus_rect, plus_response) =
+                            ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
+                        if plus_response.hovered() {
+                            ui.painter().rect_filled(plus_rect, 7.0, theme::HOVER);
+                        }
+                        icons::plus(ui.painter(), plus_rect.shrink(6.0), theme::TEXT_3);
+                        if plus_response.clicked() {
                             self.new_doc();
                         }
                     })
@@ -1697,50 +1796,277 @@ impl Studio {
             || self.docs.iter().any(|d| d.analyze_after.is_some())
         {
             ctx.request_repaint_after(Duration::from_millis(35));
+        } else {
+            // Keep the living background drifting even when idle.
+            ctx.request_repaint_after(Duration::from_millis(66));
         }
     }
-    fn sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("explorer").resizable(true).default_width(220.0).width_range(160.0..=420.0).show(ctx,|ui| {
-            ui.add_space(12.0); ui.label(RichText::new("WORKSPACE").small().strong().color(MUTED));
-            if let Some(root)=&self.workspace { ui.label(RichText::new(root.file_name().unwrap_or_default().to_string_lossy()).strong()); }
-            else { ui.label(RichText::new("Open a project folder\nfrom the File menu.").small().color(MUTED)); }
-            ui.horizontal(|ui| {
-                if ui.add_enabled(self.workspace.is_some(), egui::Button::new("Refresh")).clicked()
-                    && let Some(root) = &self.workspace {
-                        self.files = project_files(root); self.analysis_stamp = None;
-                        for doc in &mut self.docs { doc.analyze_after = Some(Instant::now()); }
+    fn icon_button(
+        ui: &mut egui::Ui,
+        draw: fn(&egui::Painter, egui::Rect, Color32),
+        tip: &str,
+    ) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(34.0, 30.0), egui::Sense::click());
+        let response = response.on_hover_text(tip);
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 8.0, theme::HOVER);
+        }
+        draw(ui.painter(), rect.shrink(6.0), theme::TEXT_2);
+        response
+    }
+    fn activity_bar(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("activity")
+            .exact_width(48.0)
+            .frame(egui::Frame::new().fill(theme::BG))
+            .show(ctx, |ui| {
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    let problems = self
+                        .docs
+                        .iter()
+                        .filter(|doc| doc.diagnostic.is_some())
+                        .count();
+                    let items = [
+                        ("Explorer", Activity::Explorer),
+                        ("Symbols", Activity::Symbols),
+                        ("Problems", Activity::Problems),
+                        ("Audit log", Activity::Audit),
+                    ];
+                    for (tip, target) in items {
+                        let active = self.activity == target;
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(40.0, 36.0), egui::Sense::click());
+                        let response = response.on_hover_text(tip);
+                        let painter = ui.painter();
+                        if active {
+                            painter.rect_filled(rect, 9.0, theme::ACTIVE);
+                            painter.rect_filled(
+                                egui::Rect::from_min_size(
+                                    rect.left_top() + egui::vec2(-4.0, 8.0),
+                                    egui::vec2(3.0, 20.0),
+                                ),
+                                1.5,
+                                theme::ACCENT,
+                            );
+                        } else if response.hovered() {
+                            painter.rect_filled(rect, 9.0, theme::HOVER);
+                        }
+                        let color = if active { theme::TEXT } else { theme::TEXT_3 };
+                        let inner = rect.shrink(9.0);
+                        match target {
+                            Activity::Explorer => {
+                                icons::document(painter, inner, color);
+                            }
+                            Activity::Symbols => {
+                                painter.text(
+                                    inner.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "ƒ",
+                                    egui::FontId::proportional(16.0),
+                                    color,
+                                );
+                            }
+                            Activity::Problems => {
+                                icons::warning(painter, inner, color);
+                            }
+                            Activity::Audit => {
+                                icons::shield(painter, inner, color);
+                            }
+                        }
+                        if target == Activity::Problems && problems > 0 {
+                            painter.circle_filled(
+                                rect.right_top() + egui::vec2(-7.0, 7.0),
+                                3.5,
+                                theme::DANGER,
+                            );
+                        }
+                        if response.clicked() {
+                            self.activity = target;
+                        }
                     }
-                if ui.button("Find file").on_hover_text("Ctrl+P").clicked() { self.open_navigator(true); }
+                });
             });
-            let mut open=None;
-            egui::ScrollArea::vertical().max_height(260.0).show(ui,|ui| {
+    }
+    fn side_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("explorer")
+            .resizable(true)
+            .default_width(232.0)
+            .width_range(170.0..=420.0)
+            .show(ctx, |ui| {
+                ui.add_space(12.0);
+                match self.activity {
+                    Activity::Explorer => self.explorer_panel(ui),
+                    Activity::Symbols => self.symbols_panel(ui),
+                    Activity::Problems => {
+                        ui.label(
+                            RichText::new("PROBLEMS")
+                                .small()
+                                .strong()
+                                .color(theme::TEXT_3),
+                        );
+                        self.problems_panel(ui);
+                    }
+                    Activity::Audit => self.audit_panel(ui),
+                }
+            });
+    }
+    fn explorer_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("EXPLORER")
+                    .small()
+                    .strong()
+                    .color(theme::TEXT_3),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if Self::icon_button(ui, icons::search, "Find file  (Ctrl+P)").clicked() {
+                    self.open_navigator(true);
+                }
+                if Self::icon_button(ui, icons::refresh, "Refresh project files").clicked()
+                    && let Some(root) = &self.workspace
+                {
+                    self.files = project_files(root);
+                    self.analysis_stamp = None;
+                    for doc in &mut self.docs {
+                        doc.analyze_after = Some(Instant::now());
+                    }
+                }
+            });
+        });
+        let Some(root) = self.workspace.clone() else {
+            theme::card().show(ui, |ui| {
+                ui.label(RichText::new("No project folder").strong());
+                ui.label(
+                    RichText::new(
+                        "Open a folder with AEGIS sources to browse its files and symbols.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
+                if ui
+                    .add(
+                        egui::Button::new("Open project folder…")
+                            .corner_radius(8.0)
+                            .fill(theme::ACCENT_DIM),
+                    )
+                    .clicked()
+                {
+                    self.open_folder();
+                }
+            });
+            return;
+        };
+        ui.label(RichText::new(root.file_name().unwrap_or_default().to_string_lossy()).strong());
+        let mut open = None;
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .show(ui, |ui| {
                 let tree = navigation::build_tree(
                     self.workspace.as_deref().unwrap_or(Path::new("")),
                     &self.files,
                 );
                 Self::tree_nodes(ui, &tree, &mut open);
             });
-            if let Some(path)=open { self.open_path(path); }
-            ui.add_space(18.0); ui.separator(); ui.add_space(8.0);
-            ui.label(RichText::new("SYMBOLS").small().strong().color(MUTED));
-            if let Some(entry) = &self.project_entry { ui.label(RichText::new(format!("Entry: {}", entry.file_name().unwrap_or_default().to_string_lossy())).small().color(MUTED)).on_hover_text(entry.display().to_string()); }
-            let mut location = None;
-            egui::ScrollArea::vertical().id_salt("project-symbols").max_height((ui.available_height()-145.0).max(80.0)).show(ui, |ui| {
-            if let Some(doc)=self.docs.get_mut(self.active) {
-                for function in &doc.functions {
-                    if ui.selectable_label(false,RichText::new(format!("ƒ  {}",function.signature)).monospace()).clicked() { location=Some((function.path.clone(),function.span.start)); }
+        if let Some(path) = open {
+            self.open_path(path);
+        }
+    }
+    fn symbols_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("SYMBOLS")
+                .small()
+                .strong()
+                .color(theme::TEXT_3),
+        );
+        if let Some(entry) = &self.project_entry {
+            ui.label(
+                RichText::new(format!(
+                    "Entry: {}",
+                    entry.file_name().unwrap_or_default().to_string_lossy()
+                ))
+                .small()
+                .color(MUTED),
+            )
+            .on_hover_text(entry.display().to_string());
+        }
+        let mut location = None;
+        egui::ScrollArea::vertical()
+            .id_salt("project-symbols")
+            .show(ui, |ui| {
+                if let Some(doc) = self.docs.get_mut(self.active) {
+                    for function in &doc.functions {
+                        if ui
+                            .selectable_label(
+                                false,
+                                RichText::new(format!("ƒ  {}", function.signature)).monospace(),
+                            )
+                            .clicked()
+                        {
+                            location = Some((function.path.clone(), function.span.start));
+                        }
+                    }
+                    if let Some(error) = &doc.diagnostic {
+                        ui.add_space(14.0);
+                        ui.label(RichText::new("PROBLEM").small().color(theme::DANGER));
+                        if let Some(path) = &error.path {
+                            ui.label(RichText::new(path.display().to_string()).small());
+                        }
+                        if ui
+                            .link(format!(
+                                "{}:{}  {}",
+                                error.line, error.column, error.message
+                            ))
+                            .clicked()
+                        {
+                            location = Some((error.path.clone(), error.span.start));
+                        }
+                    }
                 }
-                if let Some(error)=&doc.diagnostic {
-                    ui.add_space(14.0); ui.label(RichText::new("PROBLEM").small().color(Color32::from_rgb(249,131,142)));
-                    if let Some(path) = &error.path { ui.label(RichText::new(path.display().to_string()).small()); }
-                    if ui.link(format!("{}:{}  {}",error.line,error.column,error.message)).clicked() { location=Some((error.path.clone(),error.span.start)); }
-                }
+            });
+        if let Some((path, offset)) = location {
+            self.open_location(path, offset);
+        }
+    }
+    fn audit_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("PERMISSION AUDIT")
+                .small()
+                .strong()
+                .color(theme::TEXT_3),
+        );
+        ui.label(
+            RichText::new("Журнал содержит только метаданные действий; содержимое файлов и секреты не записываются.")
+                .small()
+                .color(MUTED),
+        );
+        if ui.button("Copy redacted TSV").clicked() {
+            ui.ctx().copy_text(self.permission_ledger.redacted_tsv());
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for entry in self.permission_ledger.entries() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(
+                        RichText::new(format!("#{}", entry.request_id))
+                            .size(12.0)
+                            .color(theme::TEXT_3),
+                    );
+                    ui.label(
+                        RichText::new(format!("{} → {}", entry.actor, entry.target)).size(12.0),
+                    );
+                    ui.label(
+                        RichText::new(format!("{:?} / {:?}", entry.capability, entry.decision))
+                            .size(12.0)
+                            .color(theme::TEXT_2),
+                    );
+                    ui.label(RichText::new(&entry.result).size(12.0));
+                    ui.label(
+                        RichText::new(format!("{} ms", entry.duration.as_millis()))
+                            .size(12.0)
+                            .color(theme::TEXT_3),
+                    );
+                });
+                ui.separator();
             }
-            });
-            if let Some((path, offset)) = location { self.open_location(path, offset); }
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT),|ui| {
-                ui.label(RichText::new(concat!("Sentinel ", env!("CARGO_PKG_VERSION"), " — Aegis IDE\nNative compiler + editor\n\nCtrl+Shift+P  Command palette\nCtrl+P  Find file\nCtrl+G  Go to line\nCtrl+F  Find\nCtrl+S  Save\nF6  Build\nF5  Build and run\nF12  Go to definition\nCtrl+Space  Completions")).small().color(MUTED));
-            });
         });
     }
     fn open_navigator(&mut self, files: bool) {
@@ -1942,7 +2268,7 @@ impl Studio {
                     ui.label(
                         RichText::new(numbers)
                             .font(FontId::monospace(15.0))
-                            .color(Color32::from_rgb(76, 92, 112)),
+                            .color(theme::GUTTER),
                     );
                     let mut layouter = highlighting::layout;
                     let output = egui::TextEdit::multiline(&mut doc.text)
@@ -1950,6 +2276,7 @@ impl Studio {
                         .code_editor()
                         .font(FontId::monospace(15.0))
                         .frame(false)
+                        .background_color(Color32::TRANSPARENT)
                         .desired_width(ui.available_width().max(600.0))
                         .desired_rows(24)
                         .char_limit(aegis_lang::MAX_SOURCE)
@@ -2110,7 +2437,7 @@ impl Studio {
                 );
             });
             if let Some(error) = &unlock.error {
-                ui.colored_label(Color32::from_rgb(249, 131, 142), error);
+                ui.colored_label(theme::DANGER, error);
             }
             ui.horizontal(|ui| {
                 if ui.button("Continue").clicked() {
@@ -2216,30 +2543,6 @@ impl eframe::App for Studio {
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.label(aegis_lang::THIRD_PARTY_NOTICES);
-                    });
-                });
-        }
-        if self.audit_open {
-            egui::Window::new("Permission audit")
-                .open(&mut self.audit_open)
-                .default_size([720.0, 360.0])
-                .show(ctx, |ui| {
-                    ui.label("Журнал содержит только метаданные действий; содержимое файлов и секреты не записываются.");
-                    if ui.button("Copy redacted TSV").clicked() {
-                        ctx.copy_text(self.permission_ledger.redacted_tsv());
-                    }
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for entry in self.permission_ledger.entries() {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.monospace(format!("#{}", entry.request_id));
-                                ui.label(format!("{} → {}", entry.actor, entry.target));
-                                ui.label(format!("{:?} / {:?}", entry.capability, entry.decision));
-                                ui.label(&entry.result);
-                                ui.label(format!("{} ms", entry.duration.as_millis()));
-                                ui.label(format!("t={} ms", entry.timestamp_ms));
-                            });
-                            ui.separator();
-                        }
                     });
                 });
         }

@@ -4,17 +4,17 @@ use eframe::egui::{self, Color32, FontId, TextFormat, text::LayoutJob};
 pub fn job(source: &str) -> LayoutJob {
     let mut job = LayoutJob::default();
     let mut at = 0;
-    let normal = Color32::from_rgb(212, 222, 236);
+    let normal = Color32::from_rgb(216, 223, 235);
     for token in highlight(source) {
         if at < token.span.start {
             append(&mut job, &source[at..token.span.start], normal);
         }
         let color = match token.kind {
-            HighlightKind::Keyword => Color32::from_rgb(188, 159, 252),
-            HighlightKind::Number => Color32::from_rgb(235, 189, 124),
-            HighlightKind::String => Color32::from_rgb(154, 206, 160),
-            HighlightKind::Comment => Color32::from_rgb(109, 135, 125),
-            HighlightKind::Invalid => Color32::from_rgb(249, 120, 137),
+            HighlightKind::Keyword => Color32::from_rgb(125, 162, 255),
+            HighlightKind::Number => Color32::from_rgb(240, 179, 107),
+            HighlightKind::String => Color32::from_rgb(127, 214, 164),
+            HighlightKind::Comment => Color32::from_rgb(90, 106, 130),
+            HighlightKind::Invalid => Color32::from_rgb(244, 104, 126),
             _ => normal,
         };
         append(&mut job, &source[token.span.clone()], color);
