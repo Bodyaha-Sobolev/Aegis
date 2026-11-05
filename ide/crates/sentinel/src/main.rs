@@ -10,6 +10,7 @@ mod inspector;
 mod navigation;
 mod permissions;
 mod runner;
+mod sky;
 mod theme;
 
 use aegis_lang::{Diagnostic, FunctionInfo, codec, storage};
@@ -262,6 +263,10 @@ struct Studio {
     navigation_focus: bool,
     navigation_selected: usize,
     smoke_frames: Option<u32>,
+    /// `--sky-preview`: the animated background alone, no interface on top.
+    sky_preview: bool,
+    /// The exact DeepSeek hero pattern, evaluated per frame.
+    sky: sky::SkyField,
     smoke_exports: bool,
     smoke_disasm: bool,
     licenses_open: bool,
@@ -318,6 +323,8 @@ impl Default for Studio {
             navigation_focus: false,
             navigation_selected: 0,
             smoke_frames: None,
+            sky_preview: false,
+            sky: sky::SkyField::default(),
             smoke_exports: false,
             smoke_disasm: false,
             licenses_open: false,
@@ -348,6 +355,17 @@ impl Studio {
         theme::install(&cc.egui_ctx);
         let mut app = Self::default();
         let args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args.first().is_some_and(|s| s == "--sky-preview") {
+            app.sky_preview = true;
+            // Optional second argument captures a frame for verification.
+            if let Some(path) = args.get(1) {
+                app.smoke_frames = Some(0);
+                app.screenshot = Some(PathBuf::from(path));
+            }
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            return app;
+        }
         if args
             .first()
             .is_some_and(|s| s == "--smoke-test" || s == "--smoke-inspect")
@@ -1406,6 +1424,146 @@ impl Studio {
         {
             theme::install(ctx);
         }
+        if self.sky_preview {
+            // Nothing but the living background fills the window; a hairline
+            // custom titlebar (drag zone + minimal controls) replaces the
+            // native one. The smoke frame counter still runs so
+            // `--sky-preview shot.png` captures and exits on its own.
+            if let Some(frames) = &mut self.smoke_frames {
+                *frames += 1;
+                if *frames == 16 && self.screenshot.is_some() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+                }
+                if *frames >= 40 {
+                    self.allow_exit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    let full = ui.max_rect();
+                    self.sky.paint(ui, full);
+                    // --- custom titlebar ------------------------------------------------
+                    let bar_height = 40.0;
+                    let bar =
+                        egui::Rect::from_min_size(full.min, egui::vec2(full.width(), bar_height));
+                    let button_size = egui::vec2(46.0, bar_height);
+                    let close_rect = egui::Rect::from_min_size(
+                        bar.right_top() - egui::vec2(46.0, 0.0),
+                        button_size,
+                    );
+                    let max_rect_w = egui::Rect::from_min_size(
+                        close_rect.left_top() - egui::vec2(46.0, 0.0),
+                        button_size,
+                    );
+                    let min_rect_w = egui::Rect::from_min_size(
+                        max_rect_w.left_top() - egui::vec2(46.0, 0.0),
+                        button_size,
+                    );
+                    let drag_rect =
+                        egui::Rect::from_min_max(bar.min, egui::pos2(min_rect_w.left(), bar.max.y));
+                    let drag = ui.interact(
+                        drag_rect,
+                        Id::new("sky-drag"),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if drag.double_clicked() {
+                        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    } else if drag.dragged() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    let window_button =
+                        |ui: &egui::Ui,
+                         rect: egui::Rect,
+                         id: &str,
+                         hover_fill: Color32,
+                         draw: fn(&egui::Painter, egui::Rect, Color32)| {
+                            let response = ui.interact(rect, Id::new(id), egui::Sense::click());
+                            let painter = ui.painter();
+                            if response.hovered() {
+                                painter.rect_filled(rect, 0.0, hover_fill);
+                            }
+                            let ink = if response.hovered() {
+                                theme::TEXT
+                            } else {
+                                theme::TEXT_3
+                            };
+                            draw(painter, rect.shrink2(egui::vec2(16.0, 12.0)), ink);
+                            response
+                        };
+                    if window_button(
+                        ui,
+                        close_rect,
+                        "sky-close",
+                        Color32::from_rgba_unmultiplied(232, 17, 35, 230),
+                        icons::close,
+                    )
+                    .clicked()
+                    {
+                        self.allow_exit = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if window_button(
+                        ui,
+                        max_rect_w,
+                        "sky-maximize",
+                        theme::HOVER,
+                        |painter, rect, ink| {
+                            painter.rect_stroke(
+                                rect,
+                                2.0,
+                                egui::Stroke::new(1.6, ink),
+                                egui::StrokeKind::Inside,
+                            );
+                        },
+                    )
+                    .clicked()
+                    {
+                        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    }
+                    if window_button(
+                        ui,
+                        min_rect_w,
+                        "sky-minimize",
+                        theme::HOVER,
+                        |painter, rect, ink| {
+                            painter.line_segment(
+                                [rect.left_bottom(), rect.right_bottom()],
+                                egui::Stroke::new(1.6, ink),
+                            );
+                        },
+                    )
+                    .clicked()
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                });
+            for event in ctx.input(|i| i.events.clone()) {
+                if let egui::Event::Screenshot { image, .. } = event
+                    && let Some(path) = self.screenshot.take()
+                {
+                    let rgba: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+                    if let Err(e) = image::save_buffer(
+                        path,
+                        &rgba,
+                        image.size[0] as u32,
+                        image.size[1] as u32,
+                        image::ColorType::Rgba8,
+                    ) {
+                        self.fail(e.to_string());
+                    }
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.allow_exit = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            ctx.request_repaint_after(Duration::from_millis(33));
+            return;
+        }
         // Test-only command-line mode exercises an actual native GPU window and
         // optionally captures that window's own rendered frame, without input.
         if let Some(frames) = &mut self.smoke_frames {
@@ -1709,7 +1867,7 @@ impl Studio {
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).fill(theme::BG))
             .show(ctx, |ui| {
-                theme::blobs(ui.painter(), ui.max_rect(), ctx.input(|i| i.time) as f32);
+                self.sky.paint(ui, ui.max_rect());
                 let mut close = None;
                 let tab_strip = egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -2656,10 +2814,16 @@ fn project_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 fn main() -> eframe::Result {
+    let sky_preview = std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--sky-preview");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 850.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_min_inner_size([900.0, 600.0])
+            // The sky preview draws its own minimal window controls over the
+            // background; the IDE keeps the native frame.
+            .with_decorations(!sky_preview),
         persist_window: false,
         ..Default::default()
     };
