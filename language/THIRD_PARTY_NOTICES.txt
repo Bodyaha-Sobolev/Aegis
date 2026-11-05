@@ -1,3 +1,13 @@
+Bundled font: DM Sans (weights 400/500/700, latin subset)
+https://github.com/googlefonts/dm-fonts
+Copyright 2014 The DM Sans Project Authors (https://github.com/googlefonts/dm-fonts)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1
+(OFL-1.1). The full license text ships with the Sentinel IDE sources at
+ide/crates/sentinel/assets/fonts/OFL.txt. The font is embedded as
+sentinel assets and is used only for interface typography.
+
+
 Vendored component: iced-x86 1.21.0
 https://github.com/icedland/iced
 

@@ -45,7 +45,13 @@ pub fn border_strong() -> Stroke {
 }
 
 // Typography --------------------------------------------------------------
+/// DM Sans is DeepSeek's interface font (SIL OFL-1.1, latin subset); the
+/// embedded copies keep the IDE looking right without any system dependency.
+const DM_SANS_400: &[u8] = include_bytes!("../assets/fonts/dm-sans-400.ttf");
+const DM_SANS_500: &[u8] = include_bytes!("../assets/fonts/dm-sans-500.ttf");
+const DM_SANS_700: &[u8] = include_bytes!("../assets/fonts/dm-sans-700.ttf");
 const SEGOE_PATHS: &[&str] = &["C:\\Windows\\Fonts\\segoeui.ttf"];
+const SEGOE_BOLD_PATHS: &[&str] = &["C:\\Windows\\Fonts\\segoeuib.ttf"];
 const MONO_PATHS: &[&str] = &[
     "C:\\Windows\\Fonts\\CascadiaCode.ttf",
     "C:\\Windows\\Fonts\\consola.ttf",
@@ -58,20 +64,51 @@ fn read_font(paths: &[&str]) -> Option<Vec<u8>> {
         .filter(|bytes| bytes.len() > 1000)
 }
 
-/// Install system typography (Segoe UI + Cascadia Code when present) and the
-/// widget visuals. Missing fonts silently keep the built-in egui defaults.
+/// Install typography — embedded DM Sans with a Segoe UI fallback for the
+/// glyphs DM Sans does not cover (Cyrillic UI strings) — and the widget visuals.
 pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        "dm_sans_400".into(),
+        FontData::from_owned(DM_SANS_400.to_vec()).into(),
+    );
+    fonts.font_data.insert(
+        "dm_sans_500".into(),
+        FontData::from_owned(DM_SANS_500.to_vec()).into(),
+    );
+    fonts.font_data.insert(
+        "dm_sans_700".into(),
+        FontData::from_owned(DM_SANS_700.to_vec()).into(),
+    );
+    let mut regular = vec!["dm_sans_400".to_owned()];
     if let Some(bytes) = read_font(SEGOE_PATHS) {
         fonts
             .font_data
             .insert("segoe_ui".into(), FontData::from_owned(bytes).into());
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "segoe_ui".into());
+        regular.push("segoe_ui".into());
     }
+    fonts
+        .families
+        .insert(egui::FontFamily::Proportional, regular.clone());
+    fonts.families.insert(
+        egui::FontFamily::Name("Medium".into()),
+        vec!["dm_sans_500".into()]
+            .into_iter()
+            .chain(regular.iter().skip(1).cloned())
+            .collect(),
+    );
+    let mut bold = vec!["dm_sans_700".to_owned()];
+    if let Some(bytes) = read_font(SEGOE_BOLD_PATHS) {
+        fonts
+            .font_data
+            .insert("segoe_ui_bold".into(), FontData::from_owned(bytes).into());
+        bold.push("segoe_ui_bold".into());
+    } else if regular.len() > 1 {
+        bold.push("segoe_ui".into());
+    }
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("Bold".into()), bold);
     if let Some(bytes) = read_font(MONO_PATHS) {
         fonts
             .font_data
@@ -125,15 +162,17 @@ pub fn install(ctx: &egui::Context) {
         style
             .text_styles
             .insert(egui::TextStyle::Body, FontId::proportional(14.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, FontId::proportional(14.0));
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            FontId::new(14.0, egui::FontFamily::Name("Medium".into())),
+        );
         style
             .text_styles
             .insert(egui::TextStyle::Small, FontId::proportional(12.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Heading, FontId::proportional(19.0));
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            FontId::new(19.0, egui::FontFamily::Name("Bold".into())),
+        );
         style
             .text_styles
             .insert(egui::TextStyle::Monospace, FontId::monospace(14.5));
@@ -143,7 +182,7 @@ pub fn install(ctx: &egui::Context) {
         );
         style.text_styles.insert(
             egui::TextStyle::Name("Brand".into()),
-            FontId::proportional(17.0),
+            FontId::new(16.0, egui::FontFamily::Name("Bold".into())),
         );
     });
 }
@@ -162,14 +201,6 @@ pub fn card() -> egui::Frame {
 }
 
 // Living background --------------------------------------------------------
-struct Blob {
-    radius: f32,
-    color: Color32,
-    speed: f32,
-    phase: f32,
-    reach: f32,
-}
-
 /// One smooth radial glow: a triangle fan from a colored center vertex to
 /// fully transparent edge vertices (premultiplied interpolation = clean falloff).
 fn glow(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32) {
@@ -195,40 +226,34 @@ fn glow(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Slowly drifting soft blue glows painted inside the central work area,
-/// DeepSeek-style. The painter is clipped to the calling panel.
+/// Slow ambient washes pinned near the corners, like the DeepSeek hero:
+/// a navy-blue glow top-left, a violet one bottom-right and a faint teal
+/// touch on the right edge. The whole field drifts almost imperceptibly.
 pub fn blobs(painter: &egui::Painter, rect: Rect, time: f32) {
     painter.rect_filled(rect, 0.0, BG);
-    let blobs = [
-        Blob {
-            radius: 0.42,
-            color: Color32::from_rgba_unmultiplied(77, 107, 254, 96),
-            speed: 0.11,
-            phase: 0.0,
-            reach: 0.2,
-        },
-        Blob {
-            radius: 0.34,
-            color: Color32::from_rgba_unmultiplied(124, 92, 255, 76),
-            speed: 0.07,
-            phase: 2.1,
-            reach: 0.28,
-        },
-        Blob {
-            radius: 0.3,
-            color: Color32::from_rgba_unmultiplied(47, 191, 166, 48),
-            speed: 0.09,
-            phase: 4.2,
-            reach: 0.34,
-        },
-    ];
-    let min_side = rect.height().min(rect.width());
-    for blob in &blobs {
-        let angle = time * blob.speed + blob.phase;
-        let center =
-            rect.center() + Vec2::new(angle.cos(), angle.sin() * 0.7) * min_side * blob.reach;
-        glow(painter, center, min_side * blob.radius, blob.color);
-    }
+    let drift = Vec2::new((time * 0.05).cos(), (time * 0.05).sin() * 0.6)
+        * rect.height().min(rect.width())
+        * 0.04;
+    let w = rect.width();
+    let h = rect.height();
+    glow(
+        painter,
+        rect.left_top() + egui::vec2(w * 0.2, h * 0.12) + drift,
+        h * 1.05,
+        Color32::from_rgba_unmultiplied(61, 90, 220, 52),
+    );
+    glow(
+        painter,
+        rect.right_bottom() - egui::vec2(w * 0.16, h * 0.14) - drift,
+        h * 1.1,
+        Color32::from_rgba_unmultiplied(94, 70, 200, 40),
+    );
+    glow(
+        painter,
+        rect.right_top() + egui::vec2(-w * 0.1, h * 0.4),
+        h * 0.7,
+        Color32::from_rgba_unmultiplied(47, 191, 166, 26),
+    );
 }
 
 // Gradient painting --------------------------------------------------------

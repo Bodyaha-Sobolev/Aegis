@@ -1464,22 +1464,32 @@ impl Studio {
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         egui::TopBottomPanel::top("toolbar")
-            .exact_height(56.0)
+            .exact_height(52.0)
             .show(ctx, |ui| {
-                ui.add_space(7.0);
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let (mark, _) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::hover());
+                    let (mark, _) = ui.allocate_exact_size(Vec2::splat(28.0), egui::Sense::hover());
                     theme::brand_mark(ui.painter(), mark);
-                    ui.vertical(|ui| {
-                        ui.add_space(2.0);
-                        ui.label(
-                            RichText::new("SENTINEL")
-                                .text_style(egui::TextStyle::Name("Brand".into()))
-                                .strong()
-                                .color(theme::TEXT),
-                        );
-                        ui.label(theme::caption("AEGIS IDE").color(theme::TEXT_3));
-                    });
+                    ui.label(
+                        RichText::new("S E N T I N E L")
+                            .text_style(egui::TextStyle::Name("Brand".into()))
+                            .color(theme::TEXT),
+                    );
+                    let (chip, _) =
+                        ui.allocate_exact_size(egui::vec2(64.0, 18.0), egui::Sense::hover());
+                    ui.painter().rect_stroke(
+                        chip,
+                        9.0,
+                        theme::border_strong(),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().text(
+                        chip.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "AEGIS IDE",
+                        egui::FontId::proportional(9.5),
+                        theme::TEXT_3,
+                    );
                     ui.add_space(4.0);
                     if Self::icon_button(ui, icons::plus, "New tab  (Ctrl+N)").clicked() {
                         self.new_doc();
@@ -1585,6 +1595,10 @@ impl Studio {
                         }
                     });
                 });
+                ui.painter().line_segment(
+                    [ui.max_rect().left_bottom(), ui.max_rect().right_bottom()],
+                    theme::border(),
+                );
             });
         egui::TopBottomPanel::bottom("status")
             .exact_height(28.0)
@@ -1630,11 +1644,14 @@ impl Studio {
         self.side_panel(ctx);
         egui::TopBottomPanel::bottom("output").resizable(true).default_height(200.0).min_height(90.0).show(ctx,|ui| {
             ui.horizontal(|ui| {
+                ui.add_space(6.0);
                 let problems = self.docs.iter().filter(|doc| doc.diagnostic.is_some()).count();
                 if ui
                     .selectable_label(
                         self.bottom_tab == BottomTab::Output,
-                        RichText::new("OUTPUT").small().strong().color(theme::TEXT_3),
+                        RichText::new("OUTPUT").small().strong().color(
+                            if self.bottom_tab == BottomTab::Output { theme::TEXT } else { theme::TEXT_3 },
+                        ),
                     )
                     .clicked()
                 {
@@ -1646,17 +1663,38 @@ impl Studio {
                         RichText::new(format!("PROBLEMS ({problems})"))
                             .small()
                             .strong()
-                            .color(if problems == 0 { theme::TEXT_3 } else { theme::DANGER }),
+                            .color(if problems > 0 {
+                                theme::DANGER
+                            } else if self.bottom_tab == BottomTab::Problems {
+                                theme::TEXT
+                            } else {
+                                theme::TEXT_3
+                            }),
                     )
                     .clicked()
                 {
                     self.bottom_tab = BottomTab::Problems;
                 }
                 if self.bottom_tab == BottomTab::Output {
-                    if ui.small_button("Clear").clicked() { self.output.clear(); }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Clear").size(12.0).color(theme::TEXT_3))
+                                .corner_radius(6.0)
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.output.clear();
+                    }
                     if self.busy || self.analyzing { ui.spinner(); }
                     if self.output.len()>=OUTPUT_LIMIT { ui.label(RichText::new("Output limit reached (1 MiB)").small().color(Color32::YELLOW)); }
                 }
+                ui.painter().line_segment(
+                    [ui.max_rect().left_bottom(), ui.max_rect().right_bottom()],
+                    theme::border(),
+                );
             });
             match self.bottom_tab {
                 BottomTab::Output => {
@@ -1673,68 +1711,73 @@ impl Studio {
             .show(ctx, |ui| {
                 theme::blobs(ui.painter(), ui.max_rect(), ctx.input(|i| i.time) as f32);
                 let mut close = None;
-                egui::ScrollArea::horizontal().show(ui, |ui| {
+                let tab_strip = egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.add_space(4.0);
+                        ui.add_space(10.0);
                         for (i, doc) in self.docs.iter().enumerate() {
                             let active = i == self.active;
                             let title = doc.title();
                             let text_width = ui.fonts_mut(|f| {
                                 f.layout_no_wrap(
                                     title.clone(),
-                                    egui::FontId::proportional(13.5),
+                                    egui::FontId::new(
+                                        13.5,
+                                        egui::FontFamily::Name("Medium".into()),
+                                    ),
                                     theme::TEXT,
                                 )
                                 .size()
                                 .x
                             });
-                            let width = (text_width + 46.0).max(104.0);
+                            let width = (text_width + 44.0).max(96.0);
                             let (rect, response) = ui
-                                .allocate_exact_size(egui::vec2(width, 32.0), egui::Sense::click());
+                                .allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
                             let response = response.on_hover_text(doc.path.as_ref().map_or_else(
                                 || "Unsaved buffer".into(),
                                 |p| p.display().to_string(),
                             ));
                             let painter = ui.painter();
-                            let shape = egui::CornerRadius {
-                                nw: 9,
-                                ne: 9,
-                                sw: 0,
-                                se: 0,
-                            };
+                            let mut text_x = rect.left() + 6.0;
+                            if doc.protected {
+                                painter.text(
+                                    egui::pos2(text_x + 5.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    "◈",
+                                    egui::FontId::proportional(12.5),
+                                    theme::ACCENT_VIOLET,
+                                );
+                                text_x += 14.0;
+                            }
+                            painter.text(
+                                egui::pos2(text_x + 5.0, rect.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                &title,
+                                egui::FontId::new(13.5, egui::FontFamily::Name("Medium".into())),
+                                if active { theme::TEXT } else { theme::TEXT_3 },
+                            );
                             if active {
-                                painter.rect_filled(rect, shape, theme::RAISED);
                                 painter.rect_filled(
                                     egui::Rect::from_min_size(
-                                        rect.left_bottom() + egui::vec2(9.0, -2.0),
-                                        egui::vec2(rect.width() - 18.0, 2.0),
+                                        egui::pos2(rect.left() + 6.0, rect.bottom() - 2.0),
+                                        egui::vec2(rect.width() - 12.0, 2.0),
                                     ),
                                     1.0,
                                     theme::ACCENT,
                                 );
                             } else if response.hovered() {
-                                painter.rect_filled(rect, shape, theme::HOVER);
-                            }
-                            let mut text_x = rect.left() + 12.0;
-                            if doc.protected {
                                 painter.text(
-                                    egui::pos2(text_x, rect.center().y),
+                                    egui::pos2(text_x + 5.0, rect.center().y),
                                     egui::Align2::LEFT_CENTER,
-                                    "◈",
-                                    egui::FontId::proportional(13.5),
-                                    theme::ACCENT_VIOLET,
+                                    &title,
+                                    egui::FontId::new(
+                                        13.5,
+                                        egui::FontFamily::Name("Medium".into()),
+                                    ),
+                                    theme::TEXT_2,
                                 );
-                                text_x += 15.0;
                             }
-                            painter.text(
-                                egui::pos2(text_x, rect.center().y),
-                                egui::Align2::LEFT_CENTER,
-                                &title,
-                                egui::FontId::proportional(13.5),
-                                if active { theme::TEXT } else { theme::TEXT_2 },
-                            );
                             let close_rect = egui::Rect::from_center_size(
-                                egui::pos2(rect.right() - 14.0, rect.center().y),
+                                egui::pos2(rect.right() - 12.0, rect.center().y),
                                 egui::vec2(17.0, 17.0),
                             );
                             let close_response = ui
@@ -1745,14 +1788,16 @@ impl Studio {
                                 )
                                 .on_hover_text("Close tab  (Ctrl+W)");
                             if close_response.hovered() {
-                                painter.rect_filled(close_rect, 5.0, theme::ACTIVE);
+                                painter.rect_filled(close_rect, 5.0, theme::HOVER);
                             }
-                            if close_response.hovered() {
-                                icons::close(painter, close_rect.shrink(4.0), theme::TEXT);
+                            if close_response.hovered() || response.hovered() {
+                                icons::close(painter, close_rect.shrink(4.0), theme::TEXT_2);
                             } else if doc.dirty() {
                                 painter.circle_filled(close_rect.center(), 3.0, theme::ACCENT);
-                            } else {
+                            } else if active {
                                 icons::close(painter, close_rect.shrink(4.0), theme::TEXT_3);
+                            } else {
+                                icons::close(painter, close_rect.shrink(4.0), theme::GUTTER);
                             }
                             if close_response.clicked() {
                                 close = Some(doc.id);
@@ -1773,6 +1818,14 @@ impl Studio {
                         }
                     })
                 });
+                // Hairline under the whole tab strip, DeepSeek-docs style.
+                ui.painter().line_segment(
+                    [
+                        tab_strip.inner.response.rect.left_bottom(),
+                        tab_strip.inner.response.rect.right_bottom(),
+                    ],
+                    theme::border(),
+                );
                 if let Some(id) = close {
                     self.request_close(id, ctx);
                 }
@@ -1839,19 +1892,11 @@ impl Studio {
                         let response = response.on_hover_text(tip);
                         let painter = ui.painter();
                         if active {
-                            painter.rect_filled(rect, 9.0, theme::ACTIVE);
-                            painter.rect_filled(
-                                egui::Rect::from_min_size(
-                                    rect.left_top() + egui::vec2(-4.0, 8.0),
-                                    egui::vec2(3.0, 20.0),
-                                ),
-                                1.5,
-                                theme::ACCENT,
-                            );
+                            painter.rect_filled(rect, 10.0, theme::ACTIVE);
                         } else if response.hovered() {
-                            painter.rect_filled(rect, 9.0, theme::HOVER);
+                            painter.rect_filled(rect, 10.0, theme::HOVER);
                         }
-                        let color = if active { theme::TEXT } else { theme::TEXT_3 };
+                        let color = if active { theme::ACCENT } else { theme::TEXT_3 };
                         let inner = rect.shrink(9.0);
                         match target {
                             Activity::Explorer => {
@@ -1943,14 +1988,28 @@ impl Studio {
                     .small()
                     .color(MUTED),
                 );
-                if ui
-                    .add(
-                        egui::Button::new("Open project folder…")
-                            .corner_radius(8.0)
-                            .fill(theme::ACCENT_DIM),
-                    )
-                    .clicked()
-                {
+                let open_width = ui.available_width();
+                let (button_rect, button_response) =
+                    ui.allocate_exact_size(egui::vec2(open_width, 32.0), egui::Sense::click());
+                let button_response =
+                    button_response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.painter().rect_filled(
+                    button_rect,
+                    10.0,
+                    if button_response.hovered() {
+                        theme::ACCENT_HOVER
+                    } else {
+                        theme::ACCENT
+                    },
+                );
+                ui.painter().text(
+                    button_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Open project folder…",
+                    egui::FontId::new(13.5, egui::FontFamily::Name("Medium".into())),
+                    Color32::WHITE,
+                );
+                if button_response.clicked() {
                     self.open_folder();
                 }
             });
@@ -2693,6 +2752,7 @@ mod tests {
     #[test]
     fn renders_headless_and_tracks_tabs() {
         let ctx = egui::Context::default();
+        theme::install(&ctx);
         let mut app = Studio::default();
         app.new_doc();
         assert_eq!(app.docs.len(), 2);
