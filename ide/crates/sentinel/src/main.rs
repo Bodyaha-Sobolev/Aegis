@@ -10,7 +10,7 @@
 
 mod sky;
 
-use eframe::egui::{self, Color32, Key};
+use eframe::egui::{self, Color32, Key, Vec2};
 use sky::SkyField;
 use std::path::PathBuf;
 
@@ -21,6 +21,10 @@ struct App {
     allow_exit: bool,
     /// True when the Windows caption icon font was found and registered.
     windows_icons: bool,
+    /// Current window position while the titlebar drag is active. The window
+    /// follows the cursor every frame instead of entering the native modal
+    /// move loop, which froze rendering and made dragging choppy.
+    drag_origin: Option<egui::Pos2>,
 }
 
 impl eframe::App for App {
@@ -66,8 +70,23 @@ impl eframe::App for App {
                 if drag.double_clicked() {
                     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                } else if drag.dragged() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    self.drag_origin = None;
+                } else if drag.drag_started() {
+                    self.drag_origin = ctx.input(|i| i.viewport().outer_rect.map(|rect| rect.min));
+                } else if drag.drag_stopped() {
+                    self.drag_origin = None;
+                } else if drag.dragged()
+                    && let Some(origin) = &mut self.drag_origin
+                {
+                    // Move the window with the pointer every frame; the render
+                    // loop keeps running, so dragging stays as smooth as the
+                    // animation itself.
+                    let delta = drag.drag_delta();
+                    if delta != Vec2::ZERO {
+                        origin.x += delta.x;
+                        origin.y += delta.y;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(*origin));
+                    }
                 }
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 if window_button(
@@ -134,7 +153,9 @@ fn main() -> eframe::Result {
         .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            // Default native bar: drag by it, standard close/min/max buttons.
+            // No native bar: the custom bar over the background handles
+            // dragging, minimize, maximize and close.
+            .with_decorations(false)
             .with_maximized(true),
         persist_window: false,
         ..Default::default()
@@ -170,6 +191,7 @@ fn main() -> eframe::Result {
                 screenshot,
                 allow_exit: false,
                 windows_icons,
+                drag_origin: None,
             }))
         }),
     )
