@@ -19,6 +19,8 @@ struct App {
     screenshot: Option<PathBuf>,
     smoke_frames: Option<u32>,
     allow_exit: bool,
+    /// True when the Windows caption icon font was found and registered.
+    windows_icons: bool,
 }
 
 impl eframe::App for App {
@@ -73,6 +75,8 @@ impl eframe::App for App {
                     minimize_rect,
                     "titlebar-minimize",
                     Color32::from_rgba_unmultiplied(15, 17, 21, 24),
+                    self.windows_icons,
+                    false,
                 ) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
@@ -81,6 +85,8 @@ impl eframe::App for App {
                     maximize_rect,
                     "titlebar-maximize",
                     Color32::from_rgba_unmultiplied(15, 17, 21, 24),
+                    self.windows_icons,
+                    maximized,
                 ) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                 }
@@ -89,6 +95,8 @@ impl eframe::App for App {
                     close_rect,
                     "titlebar-close",
                     Color32::from_rgba_unmultiplied(232, 17, 35, 230),
+                    self.windows_icons,
+                    false,
                 ) {
                     self.allow_exit = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -134,21 +142,52 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Sentinel",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // Use the very glyph font Windows draws its own caption buttons
+            // with: Segoe Fluent Icons (Win11) / Segoe MDL2 Assets (Win10).
+            let mut fonts = egui::FontDefinitions::default();
+            let mut windows_icons = false;
+            for path in [
+                r"C:\Windows\Fonts\SegoeFluent-Icons.ttf",
+                r"C:\Windows\Fonts\segmdl2.ttf",
+            ] {
+                if let Ok(bytes) = std::fs::read(path) {
+                    fonts
+                        .font_data
+                        .insert("win_icons".into(), egui::FontData::from_owned(bytes).into());
+                    fonts.families.insert(
+                        egui::FontFamily::Name("WinIcons".into()),
+                        vec!["win_icons".into()],
+                    );
+                    windows_icons = true;
+                    break;
+                }
+            }
+            cc.egui_ctx.set_fonts(fonts);
             Ok(Box::new(App {
                 sky: SkyField::default(),
                 smoke_frames: screenshot.is_some().then_some(0),
                 screenshot,
                 allow_exit: false,
+                windows_icons,
             }))
         }),
     )
 }
 
 /// Standard window button over the background: invisible until hovered,
-/// then a flat fill with a monochrome glyph. Close turns red like the
-/// native Windows bar does.
-fn window_button(ui: &egui::Ui, rect: egui::Rect, id: &str, hover_fill: Color32) -> bool {
+/// then a flat fill. The glyphs are the exact Windows caption icons from
+/// Segoe Fluent Icons / Segoe MDL2 Assets (ChromeMinimize E921,
+/// ChromeMaximize E922, ChromeRestore E923, ChromeClose E8BB); when the
+/// font is missing, plain line shapes are drawn instead.
+fn window_button(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    id: &str,
+    hover_fill: Color32,
+    windows_icons: bool,
+    maximized: bool,
+) -> bool {
     let response = ui.interact(rect, egui::Id::new(id), egui::Sense::click());
     let painter = ui.painter();
     let close = id == "titlebar-close";
@@ -163,6 +202,22 @@ fn window_button(ui: &egui::Ui, rect: egui::Rect, id: &str, hover_fill: Color32)
         Color32::from_rgb(129, 133, 140)
     };
     let inner = rect.shrink2(egui::vec2(16.0, 12.0));
+    if windows_icons {
+        let glyph = match id {
+            "titlebar-close" => "\u{E8BB}",
+            "titlebar-maximize" if maximized => "\u{E923}",
+            "titlebar-maximize" => "\u{E922}",
+            _ => "\u{E921}",
+        };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::new(10.0, egui::FontFamily::Name("WinIcons".into())),
+            ink,
+        );
+        return response.clicked();
+    }
     match id {
         "titlebar-close" => {
             painter.line_segment(
