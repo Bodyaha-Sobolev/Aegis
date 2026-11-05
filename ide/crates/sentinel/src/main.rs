@@ -1425,10 +1425,9 @@ impl Studio {
             theme::install(ctx);
         }
         if self.sky_preview {
-            // Nothing but the living background fills the window; a hairline
-            // custom titlebar (drag zone + minimal controls) replaces the
-            // native one. The smoke frame counter still runs so
-            // `--sky-preview shot.png` captures and exits on its own.
+            // Nothing but the living background fills the window — no bar, no
+            // buttons, nothing drawn on top. The smoke frame counter still
+            // runs so `--sky-preview shot.png` captures and exits on its own.
             if let Some(frames) = &mut self.smoke_frames {
                 *frames += 1;
                 if *frames == 16 && self.screenshot.is_some() {
@@ -1444,102 +1443,6 @@ impl Studio {
                 .show(ctx, |ui| {
                     let full = ui.max_rect();
                     self.sky.paint(ui, full);
-                    // --- custom titlebar ------------------------------------------------
-                    let bar_height = 40.0;
-                    let bar =
-                        egui::Rect::from_min_size(full.min, egui::vec2(full.width(), bar_height));
-                    let button_size = egui::vec2(46.0, bar_height);
-                    let close_rect = egui::Rect::from_min_size(
-                        bar.right_top() - egui::vec2(46.0, 0.0),
-                        button_size,
-                    );
-                    let max_rect_w = egui::Rect::from_min_size(
-                        close_rect.left_top() - egui::vec2(46.0, 0.0),
-                        button_size,
-                    );
-                    let min_rect_w = egui::Rect::from_min_size(
-                        max_rect_w.left_top() - egui::vec2(46.0, 0.0),
-                        button_size,
-                    );
-                    let drag_rect =
-                        egui::Rect::from_min_max(bar.min, egui::pos2(min_rect_w.left(), bar.max.y));
-                    let drag = ui.interact(
-                        drag_rect,
-                        Id::new("sky-drag"),
-                        egui::Sense::click_and_drag(),
-                    );
-                    if drag.double_clicked() {
-                        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                    } else if drag.dragged() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
-                    let window_button =
-                        |ui: &egui::Ui,
-                         rect: egui::Rect,
-                         id: &str,
-                         hover_fill: Color32,
-                         draw: fn(&egui::Painter, egui::Rect, Color32)| {
-                            let response = ui.interact(rect, Id::new(id), egui::Sense::click());
-                            let painter = ui.painter();
-                            if response.hovered() {
-                                painter.rect_filled(rect, 0.0, hover_fill);
-                            }
-                            let ink = if response.hovered() {
-                                theme::TEXT
-                            } else {
-                                theme::TEXT_3
-                            };
-                            draw(painter, rect.shrink2(egui::vec2(16.0, 12.0)), ink);
-                            response
-                        };
-                    if window_button(
-                        ui,
-                        close_rect,
-                        "sky-close",
-                        Color32::from_rgba_unmultiplied(232, 17, 35, 230),
-                        icons::close,
-                    )
-                    .clicked()
-                    {
-                        self.allow_exit = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if window_button(
-                        ui,
-                        max_rect_w,
-                        "sky-maximize",
-                        theme::HOVER,
-                        |painter, rect, ink| {
-                            painter.rect_stroke(
-                                rect,
-                                2.0,
-                                egui::Stroke::new(1.6, ink),
-                                egui::StrokeKind::Inside,
-                            );
-                        },
-                    )
-                    .clicked()
-                    {
-                        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                    }
-                    if window_button(
-                        ui,
-                        min_rect_w,
-                        "sky-minimize",
-                        theme::HOVER,
-                        |painter, rect, ink| {
-                            painter.line_segment(
-                                [rect.left_bottom(), rect.right_bottom()],
-                                egui::Stroke::new(1.6, ink),
-                            );
-                        },
-                    )
-                    .clicked()
-                    {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                    }
                 });
             for event in ctx.input(|i| i.events.clone()) {
                 if let egui::Event::Screenshot { image, .. } = event
