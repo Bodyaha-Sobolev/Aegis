@@ -1,9 +1,15 @@
 # AEGIS: передача работы следующему разработчику / ИИ
 
+Дополнение 6 ноября 2026: язык и IDE разделены на workspace `language/`
+(Aegis) и `ide/` (Sentinel, прежний aegis-studio); IDE-бинарник —
+`dist/sentinel.exe`. Проверки обеих частей — `build.cmd test` в корне.
+Пользовательские образцы и ключи перенесены в
+`C:\Users\Explodarus\Desktop\Aegis-Archive` вне репозитория.
+
 Состояние на 28 октября 2026. Основной проект теперь на **Rust**.
-Сначала прочитать README, LANGUAGE и VISION; затем запускать проверки.
+Сначала прочитать README, docs/LANGUAGE и docs/VISION; затем запускать проверки.
 В версии 0.2.22 реализованы enum и исчерпывающий match.
-Добавлены tests/enums.rs, tools/test_enums.py и examples/results.ae.
+Добавлены tests/enums.rs, language/tools/test_enums.py и language/examples/results.ae.
 Владение составными значениями теперь учитывает теги вложенных вариантов;
 исправлено освобождение отброшенных составных результатов. Ограничены
 разрастание плана освобождения (1024 места) и буфер машинного кода (64 КиБ).
@@ -81,9 +87,23 @@ Extreme Injector/Task Manager/x64dbg/IDA. Развивать память, от�
 
 ## Устройство Rust workspace
 
-- `aegis-lang`: чистый общий compiler API `compile(&str) -> Result<Build, Diagnostic>`.
-- `aegis-cli`: build/check/enc/dec/keygen, stderr и exit 2 на ошибках.
-- `aegis-studio`: eframe/egui, тот же compiler API и контейнер.
+С 6 ноября 2026 язык и IDE разделены на два самостоятельных workspace
+в одном репозитории:
+
+- `language/` — workspace «Язык Aegis»:
+  - `crates/aegis-lang`: чистый общий compiler API `compile(&str) -> Result<Build, Diagnostic>`.
+  - `crates/aegis-cli`: build/check/enc/dec/keygen, stderr и exit 2 на ошибках.
+  - `examples/`, `third_party/iced-x86` (vendor, exclude), `tools/` (native/abi/ffi тесты),
+    `legacy/asm` (архивный прототип), `THIRD_PARTY_NOTICES.txt`.
+- `ide/` — workspace «Sentinel» (IDE; до 6 ноября 2026 — crate `aegis-studio`):
+  - `crates/sentinel`: eframe/egui, тот же compiler API и контейнер;
+    зависит от языка как `aegis-lang = { path = "../language/crates/aegis-lang" }`.
+  - `assets/sample.ae` — копия дефолтного примера, IDE не include_str-ит дерево языка.
+- Каждый workspace имеет собственные `Cargo.lock`, `[workspace.package]`,
+  `[workspace.lints]` и `[profile.release]`; версии пакетов синхронизируются вручную.
+- Общая точка входа проверок и release-сборки — `build.cmd` в корне; артефакты — `dist/`.
+- Имена компонентов: Aegis — язык, Sentinel — IDE; запас имён будущих компонентов
+  (Breach, Siphon, Ingress, Bulwark, Ward) зафиксирован в README.
 
 `aegis-lang/src/lexer.rs`: строгая лексика и терпимая подсветка с UTF-8 диапазонами.
 `parser.rs`: рекурсивный спуск, AST, защита глубины парсера и самого дерева.
@@ -283,11 +303,13 @@ IDE/CLI и SHA256SUMS.txt загружены, GitHub digests совпали с �
 ветки создавать с префиксом codex/. Перед публикацией опираться на актуальный
 git status, историю и проверки, а не только этот снимок документации.
 CI: .github/workflows/ci.yml, Windows, pinned checkout/upload-artifact,
-Rust 1.96.1, build.cmd test и release, артефакт с двумя EXE. Настоящая GUI-smoke
+Rust 1.96.1, build.cmd test и release, артефакт с двумя EXE в dist/
+(sentinel.exe и aegis-cli.exe). Настоящая GUI-smoke
 проверка пока локальная, на облачном runner наличие OpenGL не предполагается.
-В корне сохранены исходные образцы и старые .aeg/key-файлы пользователя;
-не удалять их и не принимать за новый формат. .gitignore исключает известные
-локальные ключи, EXE, target и artifacts; перед публикацией всё равно проверить
+Исходные образцы и старые .aeg/key-файлы пользователя 6 ноября 2026 перенесены
+владельцем в C:\Users\Explodarus\Desktop\Aegis-Archive вне репозитория;
+в дерево исходников они не возвращаются. .gitignore исключает EXE, ключи,
+target, dist и LAUN-OTHER; перед публикацией всё равно проверить
 состав файлов. Скриншот и промежуточные EXE не входят в исходники workspace.
 
 

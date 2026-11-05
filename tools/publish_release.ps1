@@ -14,21 +14,26 @@ if ($Tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$') {
     throw "Tag must match vMAJOR.MINOR.PATCH-alpha.N"
 }
 if ($Build) {
-    cargo build --locked --release --workspace
-    Copy-Item target\release\aegis-studio.exe aegis.exe -Force
-    Copy-Item target\release\aegis-cli.exe aegis-cli.exe -Force
+    cargo build --locked --release --manifest-path language\Cargo.toml --workspace
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo build --locked --release --manifest-path ide\Cargo.toml --workspace
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    New-Item -ItemType Directory -Force -Path dist | Out-Null
+    Copy-Item ide\target\release\sentinel.exe dist\sentinel.exe -Force
+    Copy-Item language\target\release\aegis-cli.exe dist\aegis-cli.exe -Force
+    Copy-Item language\THIRD_PARTY_NOTICES.txt dist\THIRD_PARTY_NOTICES.txt -Force
 }
-$assets = @("aegis.exe", "aegis-cli.exe", "SHA256SUMS.txt", "THIRD_PARTY_NOTICES.txt")
+$assets = @("dist\sentinel.exe", "dist\aegis-cli.exe", "dist\SHA256SUMS.txt", "dist\THIRD_PARTY_NOTICES.txt")
 foreach ($asset in $assets) {
     if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
         throw "Missing release asset: $asset"
     }
 }
 
-$hashes = foreach ($asset in $assets | Where-Object { $_ -ne "SHA256SUMS.txt" }) {
-    "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash, $asset
+$hashes = foreach ($asset in $assets | Where-Object { $_ -notlike "*SHA256SUMS.txt" }) {
+    "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash, (Split-Path -Leaf $asset)
 }
-Set-Content -LiteralPath SHA256SUMS.txt -Value $hashes -Encoding ascii
+Set-Content -LiteralPath dist\SHA256SUMS.txt -Value $hashes -Encoding ascii
 
 $credential = "protocol=https`nhost=github.com`n`n" | git credential fill
 $tokenLine = $credential -split "`n" | Where-Object { $_ -like "password=*" } | Select-Object -First 1

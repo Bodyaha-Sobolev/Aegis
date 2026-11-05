@@ -1,12 +1,17 @@
-# Aegis — язык и IDE как один проект
+# Aegis + Sentinel — язык и IDE
 
-Один Rust workspace, одно ядро языка. `aegis-studio` использует тот же компилятор,
-диагностику и формат защищённых исходников, что и `aegis-cli`.
+Язык Aegis и IDE Sentinel — два самостоятельных Rust workspace в одном
+репозитории. Sentinel (`ide/`) использует тот же компилятор, диагностику
+и формат защищённых исходников, что и `aegis-cli` (`language/`).
 Основной результат компиляции — самостоятельный Windows x64 EXE.
 Обязательной ВМ и браузерной оболочки нет.
 
+Имена компонентов: **Aegis** — язык и компилятор; **Sentinel** — IDE.
+Имена будущих компонентов: Breach (отладчик), Siphon (анализ памяти),
+Ingress (сетевой анализ), Bulwark (протектор программ), Ward (безопасные буферы).
+
 В версии 0.2.22 добавлены `enum` и исчерпывающий `match`:
-см. [пример](examples/results.ae). Старые EXE 0.2.21 этих конструкций
+см. [пример](language/examples/results.ae). Старые EXE 0.2.21 этих конструкций
 не содержат.
 
 Исходники и обновления: [Bodyaha-Sobolev/Aegis](https://github.com/Bodyaha-Sobolev/Aegis).
@@ -21,14 +26,15 @@ Windows CI запускает проверки и собирает IDE/CLI; го
 интеграционных проверок и вызовов Windows ABI через ctypes.
 
 ```powershell
-.\build.cmd                           # release-сборка всего проекта
-.\aegis.exe                           # IDE
-.\aegis-cli.exe build examples\factorial.ae factorial.exe
+.\build.cmd                           # release-сборка языка и IDE в dist\
+.\dist\sentinel.exe                   # IDE Sentinel
+.\dist\aegis-cli.exe build language\examples\factorial.ae factorial.exe
 .\factorial.exe
 .\build.cmd test                      # форматирование, lint, unit и native-тесты
 ```
 
-Для разработки: `cargo run -p aegis-studio`, `cargo run -p aegis-cli -- --help`.
+Для разработки: `cargo run --manifest-path ide\Cargo.toml -p sentinel`,
+`cargo run --manifest-path language\Cargo.toml -p aegis-cli -- --help`.
 Зависимости фиксируются в `Cargo.lock`; в `.cargo/config.toml` сборка ограничена
 четырьмя параллельными задачами. Первая сборка загружает и компилирует зависимости.
 
@@ -93,11 +99,16 @@ Windows CI запускает проверки и собирает IDE/CLI; го
 - ограничения размера и глубины, безопасный отказ на ошибочных исходниках;
 - деление на ноль завершает программу с кодом 70, переполнение деления — 71.
 
-Studio — нативное графическое приложение на eframe/egui:
+Sentinel — нативное графическое приложение IDE на eframe/egui:
 
 - тёмный интерфейс, вкладки, моноширинный редактор и номера строк;
 - подсветка на общем лексере, список функций и фоновая диагностика;
-- полные сигнатуры функций с типами и одинаковые ошибки типов в CLI и Studio;
+- панель Problems со списком диагностики всех открытых источников и переходом к месту ошибки;
+- переход к определению через F12: функции и типы в открытых файлах, `mod name;` — к файлу name.ae;
+- автодополнение (Ctrl+Space и при наборе): ключевые слова, типы, имена функций и идентификаторы буфера;
+- дерево файлов проекта вместо плоского списка;
+- палитра команд Ctrl+Shift+P: все действия IDE с поиском по названию;
+- полные сигнатуры функций с типами и одинаковые ошибки типов в CLI и Sentinel;
 - переход к функции/ошибке, поиск и замена, строка/столбец курсора;
 - открытие папки с файлами AEGIS, открытие и сохранение UTF-8;
 - обновление списка файлов кнопкой Refresh, быстрый поиск по пути через Ctrl+P;
@@ -113,7 +124,9 @@ Studio — нативное графическое приложение на efr
   моделей на диск. Системные диалоги и ОС могут иметь собственную историю.
 
 Клавиши: Ctrl+N/O/S/W, Ctrl+Shift+S, Ctrl+F, Ctrl+P — файл проекта,
-Ctrl+G — строка или `строка:столбец`, F6 — Build, F5 — Build and run.
+Ctrl+G — строка или `строка:столбец`, Ctrl+Shift+P — палитра команд,
+F12 — переход к определению, Ctrl+Space — автодополнение,
+F6 — Build, F5 — Build and run.
 Именованный исходник собирается в `<полное имя исходника>.exe`; несохранённый
 буфер — во временный каталог без записи открытого исходника на диск.
 
@@ -146,14 +159,17 @@ swap, драйверах или дампах. Новый контейнер пр
 ## Проверки
 
 ```powershell
-py tools\verify_vendor.py
-cargo fmt --package aegis-lang --package aegis-cli --package aegis-studio -- --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace
-cargo build --locked -p aegis-cli
-py tools\test_native.py
-py tools\test_windows_abi.py
-py tools\test_ffi.py
+py language\tools\verify_vendor.py
+cargo fmt --manifest-path language\Cargo.toml --all -- --check
+cargo fmt --manifest-path ide\Cargo.toml --all -- --check
+cargo clippy --locked --manifest-path language\Cargo.toml --workspace --all-targets -- -D warnings
+cargo clippy --locked --manifest-path ide\Cargo.toml --workspace --all-targets -- -D warnings
+cargo test --locked --manifest-path language\Cargo.toml --workspace
+cargo test --locked --manifest-path ide\Cargo.toml --workspace
+cargo build --locked --manifest-path language\Cargo.toml -p aegis-cli
+py language\tools\test_native.py
+py language\tools\test_windows_abi.py
+py language\tools\test_ffi.py
 py tools\audit_dependencies.py
 ```
 
@@ -174,17 +190,17 @@ C-раскладка строк/агрегатов, указатели, callback
 намеренно меняет состояние ошибки. Нужны x64 MSVC Tools и Windows SDK.
 
 Для проверки настоящего графического окна предусмотрен режим
-`aegis-studio.exe --smoke-test <путь screenshot.png>`: он открывает своё окно,
+`sentinel.exe --smoke-test <путь screenshot.png>`: он открывает своё окно,
 захватывает собственный отрисованный кадр и автоматически завершается.
 Он не заменяет полную ручную проверку клавиатуры, IME, диалогов и разных DPI.
 
-Замер компилятора: `cargo run --release -p aegis-lang --example bench`.
+Замер компилятора: `cargo run --release --manifest-path language\Cargo.toml -p aegis-lang --example bench`.
 Профиль принимает `--iterations N` и `--scenario factorial|arrays|structs`,
 а выводит стабильные поля `scenario`, `iterations`, `us_per_compile` и
 `native_code_bytes`. Это время полной компиляции примера, не наносекундная
 задержка формулы.
 
-Замер роста массивов: `py tools\bench_array_growth.py --compiler current=.\aegis-cli.exe`.
+Замер роста массивов: `py language\tools\bench_array_growth.py --compiler current=dist\aegis-cli.exe`.
 Для сравнения добавить `--compiler previous=<путь к прежнему aegis-cli.exe>`.
 Скрипт проверяет длину, последний элемент и сумму, исключает время компиляции
 и первый прогревочный запуск, сохраняет в stdout JSON с исходными измерениями,
@@ -241,71 +257,74 @@ Minecraft, готовый backend или большой игровой прое�
 
 В IDE пока нет подключения моделей ИИ, MCP, управления ПК, анализа процессов,
 дампов и сетевого трафика. Требования владельца, порядок развития и границы
-полномочий записаны в [VISION.md](VISION.md). Язык имеет приоритет над
+полномочий записаны в [docs/VISION.md](docs/VISION.md). Язык имеет приоритет над
 дальнейшим косметическим расширением IDE.
 
 ## Структура и передача работы
 
 ```text
-Cargo.toml / Cargo.lock      единый workspace и закреплённые зависимости
-crates/aegis-lang/           frontend, backend, диагностика, контейнер, запись файлов
-crates/aegis-studio/         редактор, вкладки, фоновые задачи, запуск программ
-crates/aegis-cli/            консольный доступ к общему ядру
-examples/                   исходники AEGIS
-tools/test_native.py        интеграционные проверки Rust-компилятора
-tools/audit_dependencies.py проверка закреплённых Windows-зависимостей по OSV
-legacy/asm/                 сохранённый ассемблерный прототип
-HANDOFF.md                  сведения для следующего разработчика/ИИ
+language/                    workspace «Язык Aegis»
+  crates/aegis-lang/         frontend, backend, диагностика, контейнер, запись файлов
+  crates/aegis-cli/          консольный доступ к общему ядру
+  examples/                  исходники AEGIS
+  third_party/iced-x86/      vendor-копия дизассемблерного ядра (MIT)
+  tools/test_native.py       интеграционные проверки Rust-компилятора
+  legacy/asm/                сохранённый ассемблерный прототип
+ide/                         workspace «Sentinel»
+  crates/sentinel/           редактор, вкладки, фоновые задачи, запуск программ
+tools/                       сквозные инструменты (OSV-аудит, публикация релизов)
+build.cmd                    общие проверки и release-сборка обоих workspace
+docs/HANDOFF.md              сведения для следующего разработчика/ИИ
 ```
 
 Старый `AEG0` не поддерживается новым контейнером. Для миграции сначала
-декодировать старый файл через `legacy/asm/aegisc.exe`, затем сохранить его
+декодировать старый файл через `language\legacy\asm\aegisc.exe`, затем сохранить его
 в `AEGIS02`. Не удалять старые ключи до успешной проверки миграции.
-Сборка прототипа: `tools\build-legacy.cmd`; его проверки — `py tools\test_legacy.py`.
-Для архивного прототипа нужен локальный FASM в `tools\fasm.exe`;
+Сборка прототипа: `language\tools\build-legacy.cmd`; его проверки — `py language\tools\test_legacy.py`.
+Для архивного прототипа нужен локальный FASM в `language\tools\fasm.exe`;
 сторонний EXE в репозиторий не включён. Основная Rust-сборка от FASM не зависит.
 
 
 Повторяющиеся значения массива можно задать кратко: `let buffer = [0; 256];`.
 Инициализатор вычисляется один раз; доступны также bool, u64 и неизменяемые str.
-Правила типов, копирования и размеров описаны в [LANGUAGE.md](LANGUAGE.md).
+Правила типов, копирования и размеров описаны в [docs/LANGUAGE.md](docs/LANGUAGE.md).
 
-Узкие 32-битные типы: [examples/int32.ae](examples/int32.ae).
+Узкие 32-битные типы: [examples/int32.ae](language/examples/int32.ae).
 `i32`/`u32` объявляются только явно; по умолчанию числа остаются 64-битными,
 поэтому 3000000000 не требует суффикса. Десятичные литералы проверяются по
 ширине типа, hex-шаблоны (0x80000000) используют её целиком, `-2147483648`
 пишется без преобразований.
 
-Байтовые и 16-битные типы: [examples/int8.ae](examples/int8.ae).
+Байтовые и 16-битные типы: [examples/int8.ae](language/examples/int8.ae).
 Те же правила действуют для `i8`/`u8`/`i16`/`u16`: каналы цвета в `u8`,
 заворачивание по модулю 256, сдвиги по модулю ширины.
 
-Числа с плавающей точкой: [examples/floats.ae](examples/floats.ae).
+Числа с плавающей точкой: [examples/floats.ae](language/examples/floats.ae).
 `f64` — IEEE-754 double на SSE2; целые и дробные типы не смешиваются
 неявно, преобразования явные, деление на ноль даёт inf/nan без остановки,
 `printi` печатает фиксированный формат с шестью знаками.
 
-Вложенные данные: [examples/nested-structs.ae](examples/nested-structs.ae).
+Вложенные данные: [examples/nested-structs.ae](language/examples/nested-structs.ae).
 Работают цепочки полей, индексация поля-массива, копирование вложенного значения
 и передача его в функцию. Циклические и чрезмерно большие раскладки отклоняются.
 
-Массивы объектов и матрицы: [examples/world.ae](examples/world.ae).
+Массивы объектов и матрицы: [examples/world.ae](language/examples/world.ae).
 `[Actor { ... }; N]` вычисляет объект один раз и создаёт N независимых копий.
 
-Возврат составного результата: [examples/return-values.ae](examples/return-values.ae).
+Возврат составного результата: [examples/return-values.ae](language/examples/return-values.ae).
 Функция может вернуть новый мир/массив по значению, сохранив исходные данные.
 
-Пространства имён внутри одного исходника: [examples/modules.ae](examples/modules.ae).
+Пространства имён внутри одного исходника: [examples/modules.ae](language/examples/modules.ae).
 Для отдельных файлов используется `mod name;`; приватность пока не реализована.
 
-Многофайловый проект: `aegis-cli build examples/project/main.ae`.
+Многофайловый проект: `aegis-cli build language\examples\project\main.ae`.
 Откройте main.ae в IDE для сборки того же проекта; другие входы выбираются через
 File → Use active file as project entry. Подробности путей и бюджетов — LANGUAGE.md.
 
 ## Публикация prerelease
 
 После создания и отправки тега `vX.Y.Z-alpha.N` GitHub Actions автоматически
-собирает Windows x64 и публикует `aegis.exe`, `aegis-cli.exe`,
+собирает Windows x64 и публикует `sentinel.exe`, `aegis-cli.exe`,
 `SHA256SUMS.txt` и `THIRD_PARTY_NOTICES.txt`. Локальный повторяемый вариант:
 
 ```powershell

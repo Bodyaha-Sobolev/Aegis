@@ -38,7 +38,7 @@ jobs:
         with:
           name: aegis-windows-x64
           path: |
-            aegis.exe
-            aegis-cli.exe
-            THIRD_PARTY_NOTICES.txt
+            dist/sentinel.exe
+            dist/aegis-cli.exe
+            dist/THIRD_PARTY_NOTICES.txt
           if-no-files-found: error

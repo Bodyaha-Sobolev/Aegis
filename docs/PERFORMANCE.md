@@ -6,8 +6,8 @@
 Команда компилятора:
 
 ```powershell
-cargo run --locked --release --example bench -p aegis-lang
-py tools/bench_array_growth.py --compiler current=target/release/aegis-cli.exe
+cargo run --locked --release --manifest-path language/Cargo.toml --example bench -p aegis-lang
+py language/tools/bench_array_growth.py --compiler current=dist/aegis-cli.exe
 ```
 
 На машине разработки 28 октября 2026 года (`Windows 11`, `AMD64`) 1000

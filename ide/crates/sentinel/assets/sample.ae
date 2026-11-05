@@ -1,0 +1,16 @@
+// Native x86-64 output; no interpreter is needed to run the result.
+fn factorial(n) {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+fn main() {
+    let i = 1;
+    while (i <= 6) {
+        printi(factorial(i));
+        i = i + 1;
+    }
+    return 0;
+}

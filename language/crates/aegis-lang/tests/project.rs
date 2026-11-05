@@ -1,6 +1,6 @@
 use aegis_lang::{
-    project::{self, Overlay},
     MAX_SOURCE,
+    project::{self, Overlay},
 };
 use std::fs;
 use zeroize::Zeroizing;
@@ -115,19 +115,23 @@ fn project_budgets_and_missing_modules_are_checked() {
     assert!(project::compile(dir.path(), "fn main() {}", &[]).is_err());
 
     let entry = dir.path().join("main.ae");
-    assert!(project::compile(&entry, "mod missing; fn main() {}", &[])
-        .expect_err("missing")
-        .message
-        .contains("cannot load module"));
+    assert!(
+        project::compile(&entry, "mod missing; fn main() {}", &[])
+            .expect_err("missing")
+            .message
+            .contains("cannot load module")
+    );
     fs::write(
         dir.path().join("large.ae"),
         format!("//{}", "x".repeat(MAX_SOURCE - 2)),
     )
     .expect("large");
-    assert!(project::compile(&entry, "mod large; fn main() {}", &[])
-        .expect_err("bytes")
-        .message
-        .contains("exceed"));
+    assert!(
+        project::compile(&entry, "mod large; fn main() {}", &[])
+            .expect_err("bytes")
+            .message
+            .contains("exceed")
+    );
     let mut source = String::new();
     for index in 0..63 {
         fs::write(dir.path().join(format!("m{index}.ae")), "").expect("empty module");
@@ -142,10 +146,12 @@ fn project_budgets_and_missing_modules_are_checked() {
         64
     );
     fs::write(dir.path().join("last.ae"), "").expect("last");
-    assert!(project::compile(&entry, &format!("mod last;{source}"), &[])
-        .expect_err("65 files")
-        .message
-        .contains("file limit"));
+    assert!(
+        project::compile(&entry, &format!("mod last;{source}"), &[])
+            .expect_err("65 files")
+            .message
+            .contains("file limit")
+    );
 }
 
 #[cfg(windows)]
@@ -181,15 +187,17 @@ fn junctions_cannot_escape_or_cycle_module_loading() {
     assert!(status.success());
     let source = "mod again { mod main; } fn main() {}";
     fs::write(&entry, source).expect("entry");
-    assert!(project::compile(&entry, source, &[])
-        .expect_err("cycle")
-        .message
-        .contains("cyclic module"));
+    assert!(
+        project::compile(&entry, source, &[])
+            .expect_err("cycle")
+            .message
+            .contains("cyclic module")
+    );
 }
 
 #[test]
 fn fingerprint_changes_with_entry_or_overlay_content() {
-    use aegis_lang::project::{fingerprint, Overlay};
+    use aegis_lang::project::{Overlay, fingerprint};
     let dir = tempfile::tempdir().expect("dir");
     let entry = dir.path().join("main.ae");
     let child = dir.path().join("child.ae");

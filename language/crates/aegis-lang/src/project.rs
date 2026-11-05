@@ -1,7 +1,8 @@
 //! Bounded source loading and source maps shared by CLI and Studio.
 use crate::{
+    Build, Diagnostic, MAX_SOURCE,
     lexer::{self, Keyword, Kind},
-    storage, Build, Diagnostic, MAX_SOURCE,
+    storage,
 };
 use std::{
     collections::HashSet,

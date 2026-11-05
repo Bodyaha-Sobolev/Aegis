@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/aegis-lang", "crates/aegis-cli", "crates/aegis-studio"]
+members = ["crates/aegis-lang", "crates/aegis-cli"]
 exclude = ["third_party/iced-x86"]
 resolver = "2"
 

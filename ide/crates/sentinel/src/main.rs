@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
+mod completion;
 mod disassembly;
 mod document;
 mod editor_project;
@@ -23,18 +24,13 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const SAMPLE: &str = include_str!("../../../examples/factorial.ae");
+const SAMPLE: &str = include_str!("../assets/sample.ae");
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 const ACCENT: Color32 = Color32::from_rgb(116, 218, 193);
 const MUTED: Color32 = Color32::from_rgb(137, 151, 171);
 
 enum Event {
-    Analyzed(
-        u64,
-        u64,
-        editor_project::Stamp,
-        Result<Vec<FunctionInfo>, Diagnostic>,
-    ),
+    Analyzed(u64, u64, editor_project::Stamp, AnalysisOutcome),
     Built {
         stamp: editor_project::Stamp,
         id: u64,
@@ -70,6 +66,161 @@ struct Unlock {
     dialect: String,
     error: Option<String>,
 }
+
+/// Result of one background project analysis: functions on success, first diagnostic otherwise.
+type AnalysisOutcome = Result<Vec<FunctionInfo>, Diagnostic>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BottomTab {
+    Output,
+    Problems,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletionState {
+    prefix: String,
+    items: Vec<completion::Completion>,
+    selected: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    New,
+    OpenFile,
+    OpenFolder,
+    Save,
+    SaveAs,
+    CloseTab,
+    Find,
+    GoToFile,
+    GoToLine,
+    GoToDefinition,
+    Build,
+    Run,
+    Stop,
+    Inspect,
+    Audit,
+    Licenses,
+    UseAsEntry,
+    ClearEntry,
+    Refresh,
+    OutputTab,
+    ProblemsTab,
+}
+
+struct CommandInfo {
+    id: Command,
+    label: &'static str,
+    shortcut: &'static str,
+}
+
+const COMMANDS: &[CommandInfo] = &[
+    CommandInfo {
+        id: Command::Build,
+        label: "Build",
+        shortcut: "F6",
+    },
+    CommandInfo {
+        id: Command::Run,
+        label: "Build and run",
+        shortcut: "F5",
+    },
+    CommandInfo {
+        id: Command::Stop,
+        label: "Stop run",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::Save,
+        label: "Save",
+        shortcut: "Ctrl+S",
+    },
+    CommandInfo {
+        id: Command::SaveAs,
+        label: "Save as…",
+        shortcut: "Ctrl+Shift+S",
+    },
+    CommandInfo {
+        id: Command::New,
+        label: "New tab",
+        shortcut: "Ctrl+N",
+    },
+    CommandInfo {
+        id: Command::OpenFile,
+        label: "Open file…",
+        shortcut: "Ctrl+O",
+    },
+    CommandInfo {
+        id: Command::OpenFolder,
+        label: "Open project folder…",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::CloseTab,
+        label: "Close tab",
+        shortcut: "Ctrl+W",
+    },
+    CommandInfo {
+        id: Command::Find,
+        label: "Find and replace",
+        shortcut: "Ctrl+F",
+    },
+    CommandInfo {
+        id: Command::GoToFile,
+        label: "Go to file…",
+        shortcut: "Ctrl+P",
+    },
+    CommandInfo {
+        id: Command::GoToLine,
+        label: "Go to line…",
+        shortcut: "Ctrl+G",
+    },
+    CommandInfo {
+        id: Command::GoToDefinition,
+        label: "Go to definition",
+        shortcut: "F12",
+    },
+    CommandInfo {
+        id: Command::Inspect,
+        label: "Inspect EXE / DLL / SYS…",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::Audit,
+        label: "Permission audit",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::Licenses,
+        label: "Component licenses",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::UseAsEntry,
+        label: "Use active file as project entry",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::ClearEntry,
+        label: "Clear project entry",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::Refresh,
+        label: "Refresh project files",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::ProblemsTab,
+        label: "Show problems",
+        shortcut: "",
+    },
+    CommandInfo {
+        id: Command::OutputTab,
+        label: "Show output",
+        shortcut: "",
+    },
+];
 
 struct Studio {
     docs: Vec<Document>,
@@ -109,12 +260,7 @@ struct Studio {
     inspecting: bool,
     project_entry: Option<PathBuf>,
     analysis_stamp: Option<editor_project::Stamp>,
-    analysis_cache: Option<(
-        editor_project::Stamp,
-        u64,
-        u64,
-        Result<Vec<FunctionInfo>, Diagnostic>,
-    )>,
+    analysis_cache: Option<(editor_project::Stamp, u64, u64, AnalysisOutcome)>,
     permission_ledger: permissions::PermissionLedger,
     active_key_permission: Option<u64>,
     active_key_started: Option<Instant>,
@@ -125,6 +271,9 @@ struct Studio {
     active_run_permission: Option<u64>,
     active_run_started: Option<Instant>,
     audit_open: bool,
+    bottom_tab: BottomTab,
+    completion: Option<CompletionState>,
+    palette: Option<(String, usize)>,
 }
 impl Default for Studio {
     fn default() -> Self {
@@ -178,6 +327,9 @@ impl Default for Studio {
             active_run_permission: None,
             active_run_started: None,
             audit_open: false,
+            bottom_tab: BottomTab::Output,
+            completion: None,
+            palette: None,
         }
     }
 }
@@ -558,22 +710,13 @@ impl Studio {
                         }
                         continue;
                     }
-                    if let Some(doc) = self
+                    let fresh = self
                         .docs
-                        .iter_mut()
-                        .find(|d| d.id == id && d.revision == revision)
-                    {
+                        .iter()
+                        .any(|d| d.id == id && d.revision == revision);
+                    if fresh {
                         self.analysis_cache = Some((stamp, id, revision, result.clone()));
-                        match result {
-                            Ok(functions) => {
-                                doc.functions = functions;
-                                doc.diagnostic = None;
-                            }
-                            Err(error) => {
-                                doc.functions.clear();
-                                doc.diagnostic = Some(error);
-                            }
-                        }
+                        self.apply_analysis(id, revision, result);
                     }
                 }
                 Event::Built {
@@ -794,23 +937,42 @@ impl Studio {
         });
     }
 
-    fn apply_analysis(
-        &mut self,
-        id: u64,
-        revision: u64,
-        result: Result<Vec<FunctionInfo>, Diagnostic>,
-    ) {
-        if let Some(doc) = self
-            .docs
-            .iter_mut()
-            .find(|doc| doc.id == id && doc.revision == revision)
-        {
-            match result {
-                Ok(functions) => {
-                    doc.functions = functions;
+    fn apply_analysis(&mut self, id: u64, revision: u64, result: AnalysisOutcome) {
+        match result {
+            Ok(functions) => {
+                for doc in &mut self.docs {
                     doc.diagnostic = None;
                 }
-                Err(error) => {
+                if let Some(doc) = self
+                    .docs
+                    .iter_mut()
+                    .find(|doc| doc.id == id && doc.revision == revision)
+                {
+                    doc.functions = functions;
+                }
+            }
+            Err(error) => {
+                // One analysis pipeline covers the whole project snapshot: the
+                // latest result replaces every stored diagnostic, and the error
+                // lands on the document its path points to.
+                for doc in &mut self.docs {
+                    doc.diagnostic = None;
+                }
+                let target = error
+                    .path
+                    .as_ref()
+                    .and_then(|path| {
+                        self.docs
+                            .iter()
+                            .position(|doc| doc.path.as_ref() == Some(path))
+                    })
+                    .or_else(|| {
+                        self.docs
+                            .iter()
+                            .position(|doc| doc.id == id && doc.revision == revision)
+                    });
+                if let Some(index) = target {
+                    let doc = &mut self.docs[index];
                     doc.functions.clear();
                     doc.diagnostic = Some(error);
                 }
@@ -842,6 +1004,325 @@ impl Studio {
             self.status = "No matches".into();
         }
     }
+    /// Byte offset of the editor caret as a char index into the active document.
+    fn caret_char_index(ctx: &egui::Context, id: Id) -> usize {
+        egui::text_edit::TextEditState::load(ctx, id)
+            .and_then(|state| state.cursor.char_range())
+            .map_or(0, |range| range.primary.index)
+    }
+    fn caret_byte_offset(text: &str, char_index: usize) -> usize {
+        text.char_indices()
+            .nth(char_index)
+            .map_or(text.len(), |(at, _)| at)
+    }
+    fn go_to_definition(&mut self, ctx: &egui::Context) {
+        let Some(doc) = self.docs.get(self.active) else {
+            return;
+        };
+        let id = Id::new(("source", doc.id));
+        let byte_at = Self::caret_byte_offset(&doc.text, Self::caret_char_index(ctx, id));
+        let Some((start, end)) = navigation::identifier_at(&doc.text, byte_at) else {
+            self.status = "Place the cursor on an identifier.".into();
+            return;
+        };
+        let name = doc.text[start..end].to_owned();
+        if let Some((doc_index, at)) = navigation::find_definition(&self.docs, self.active, &name) {
+            self.active = doc_index;
+            self.find_from = 0;
+            if let Some(target) = self.docs.get_mut(doc_index) {
+                target.jump_to = Some(at);
+            }
+            self.status = format!("Definition: {name}");
+            return;
+        }
+        // `mod name;` has no in-buffer declaration: the definition is the file.
+        let base = self
+            .docs
+            .get(self.active)
+            .and_then(|doc| doc.path.as_ref())
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .or_else(|| {
+                self.project_entry
+                    .as_ref()
+                    .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+            });
+        if let Some(base) = base {
+            let candidate = base.join(format!("{name}.ae"));
+            if candidate.is_file() {
+                self.open_path(candidate);
+                return;
+            }
+        }
+        self.status = format!("No definition for {name}");
+    }
+    fn open_completion(&mut self, ctx: &egui::Context) {
+        let Some(doc) = self.docs.get(self.active) else {
+            return;
+        };
+        let id = Id::new(("source", doc.id));
+        let byte_at = Self::caret_byte_offset(&doc.text, Self::caret_char_index(ctx, id));
+        self.completion = Self::fresh_completion(&doc.text, doc.functions.as_slice(), byte_at);
+    }
+    fn fresh_completion(
+        text: &str,
+        functions: &[FunctionInfo],
+        byte_at: usize,
+    ) -> Option<CompletionState> {
+        let prefix = navigation::prefix_before(text, byte_at);
+        let items = completion::completions(&prefix, functions, text);
+        (!items.is_empty()).then_some(CompletionState {
+            prefix,
+            items,
+            selected: 0,
+        })
+    }
+    fn accept_completion(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(state) = self.completion.take() else {
+            return;
+        };
+        let Some(item) = state.items.get(index) else {
+            return;
+        };
+        let label = item.label.clone();
+        let Some(doc) = self.docs.get_mut(self.active) else {
+            return;
+        };
+        let id = Id::new(("source", doc.id));
+        let char_index = Self::caret_char_index(ctx, id);
+        let byte_at = Self::caret_byte_offset(&doc.text, char_index);
+        let start = byte_at.saturating_sub(state.prefix.len());
+        let applies = start <= byte_at
+            && doc
+                .text
+                .get(start..byte_at)
+                .is_some_and(|slice| slice == state.prefix.as_str());
+        if !applies {
+            return;
+        }
+        doc.text.replace_range(start..byte_at, &label);
+        doc.changed();
+        let new_index = char_index - state.prefix.chars().count() + label.chars().count();
+        if let Some(mut loaded) = egui::text_edit::TextEditState::load(ctx, id) {
+            loaded
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(new_index),
+                )));
+            loaded.store(ctx, id);
+        }
+    }
+    fn problems_panel(&mut self, ui: &mut egui::Ui) {
+        let mut jump = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let mut any = false;
+            for doc in &self.docs {
+                let Some(error) = &doc.diagnostic else {
+                    continue;
+                };
+                any = true;
+                let where_ = error
+                    .path
+                    .as_ref()
+                    .map_or_else(|| doc.title(), |path| path.display().to_string());
+                let row = ui.selectable_label(
+                    false,
+                    RichText::new(format!("⛔ {}:{}:{}", where_, error.line, error.column))
+                        .monospace(),
+                );
+                let row = row.on_hover_text(&error.message);
+                if row.clicked() {
+                    jump = Some((doc.id, error.span.start));
+                }
+                ui.label(RichText::new(&error.message).small());
+            }
+            if !any {
+                ui.label(
+                    RichText::new(
+                        "No problems in open sources. Analysis covers the active project snapshot.",
+                    )
+                    .color(MUTED),
+                );
+            }
+        });
+        if let Some((id, offset)) = jump
+            && let Some(index) = self.docs.iter().position(|doc| doc.id == id)
+        {
+            self.active = index;
+            self.find_from = 0;
+            if let Some(doc) = self.docs.get_mut(index) {
+                doc.jump_to = Some(offset);
+            }
+        }
+    }
+    fn palette_modal(&mut self, ctx: &egui::Context) {
+        if self.palette.is_none() {
+            return;
+        }
+        let mut chosen: Option<Command> = None;
+        let mut close = false;
+        let response = egui::Modal::new(Id::new("palette")).show(ctx, |ui| {
+            ui.set_min_width(480.0);
+            ui.heading("Command palette");
+            let moved = ui.input_mut(|i| {
+                let down = i.consume_key(Modifiers::NONE, Key::ArrowDown);
+                let up = i.consume_key(Modifiers::NONE, Key::ArrowUp);
+                if down && let Some((_, selected)) = &mut self.palette {
+                    *selected = selected.saturating_add(1);
+                }
+                if up && let Some((_, selected)) = &mut self.palette {
+                    *selected = selected.saturating_sub(1);
+                }
+                down || up
+            });
+            let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+            let escape = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+            if let Some((query, selected)) = &mut self.palette {
+                let field = ui.add(
+                    egui::TextEdit::singleline(query)
+                        .desired_width(480.0)
+                        .hint_text("Type a command"),
+                );
+                if field.changed() {
+                    *selected = 0;
+                }
+                let candidates: Vec<&CommandInfo> = COMMANDS
+                    .iter()
+                    .filter(|info| navigation::matches(info.label, query))
+                    .collect();
+                *selected = (*selected).min(candidates.len().saturating_sub(1));
+                ui.label(format!(
+                    "{} commands · ↑ ↓ select · Enter runs · Esc closes",
+                    candidates.len()
+                ));
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for (index, info) in candidates.iter().enumerate() {
+                            let row = ui.selectable_label(
+                                index == *selected,
+                                RichText::new(info.label.to_string()).monospace(),
+                            );
+                            let row = if info.shortcut.is_empty() {
+                                row
+                            } else {
+                                row.on_hover_text(info.shortcut)
+                            };
+                            if moved && index == *selected {
+                                row.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if row.clicked() {
+                                chosen = Some(info.id);
+                            }
+                        }
+                    });
+                if enter {
+                    chosen = candidates.get(*selected).map(|info| info.id);
+                }
+            }
+            if escape {
+                close = true;
+            }
+        });
+        if let Some(command) = chosen {
+            self.palette = None;
+            self.completion = None;
+            self.run_command(command, ctx);
+        } else if close || response.should_close() {
+            self.palette = None;
+        }
+    }
+    fn run_command(&mut self, command: Command, ctx: &egui::Context) {
+        match command {
+            Command::New => self.new_doc(),
+            Command::OpenFile => self.open_dialog(),
+            Command::OpenFolder => self.open_folder(),
+            Command::Save => {
+                if let Some(doc) = self.docs.get(self.active) {
+                    self.save(doc.id, false, false);
+                }
+            }
+            Command::SaveAs => {
+                if let Some(doc) = self.docs.get(self.active) {
+                    self.save(doc.id, true, false);
+                }
+            }
+            Command::CloseTab => {
+                if let Some(doc) = self.docs.get(self.active) {
+                    let id = doc.id;
+                    self.request_close(id, ctx);
+                }
+            }
+            Command::Find => {
+                self.find_open = true;
+                self.find_from = 0;
+            }
+            Command::GoToFile => self.open_navigator(true),
+            Command::GoToLine => self.open_navigator(false),
+            Command::GoToDefinition => self.go_to_definition(ctx),
+            Command::Build => self.build(false),
+            Command::Run => self.build(true),
+            Command::Stop => {
+                if let Some((_, stop)) = &self.run {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+            Command::Inspect => {
+                if !self.inspecting
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Windows binary", &["exe", "dll", "sys"])
+                        .pick_file()
+                {
+                    self.inspect_binary(path, ctx.clone());
+                }
+            }
+            Command::Audit => self.audit_open = true,
+            Command::Licenses => self.licenses_open = true,
+            Command::UseAsEntry => {
+                self.project_entry = self.docs.get(self.active).and_then(|doc| doc.path.clone());
+                self.analysis_stamp = None;
+            }
+            Command::ClearEntry => {
+                self.project_entry = None;
+                self.analysis_stamp = None;
+            }
+            Command::Refresh => {
+                if let Some(root) = &self.workspace {
+                    self.files = project_files(root);
+                    self.analysis_stamp = None;
+                    for doc in &mut self.docs {
+                        doc.analyze_after = Some(Instant::now());
+                    }
+                }
+            }
+            Command::OutputTab => self.bottom_tab = BottomTab::Output,
+            Command::ProblemsTab => self.bottom_tab = BottomTab::Problems,
+        }
+    }
+    fn open_folder(&mut self) {
+        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            self.files = project_files(&path);
+            let entry = path.join("main.ae");
+            self.project_entry = entry
+                .is_file()
+                .then(|| entry.canonicalize().unwrap_or(entry));
+            self.workspace = Some(path);
+        }
+    }
+    fn tree_nodes(ui: &mut egui::Ui, nodes: &[navigation::TreeNode], open: &mut Option<PathBuf>) {
+        for node in nodes {
+            if node.is_dir {
+                egui::CollapsingHeader::new(RichText::new(node.name.clone()).strong().size(13.0))
+                    .default_open(true)
+                    .show(ui, |ui| Self::tree_nodes(ui, &node.children, open));
+            } else {
+                let row = ui.selectable_label(false, RichText::new(node.name.clone()).size(13.0));
+                let row = row.on_hover_text(node.path.display().to_string());
+                if row.clicked() {
+                    *open = Some(node.path.clone());
+                }
+            }
+        }
+    }
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.unlock.is_some() || self.close_doc.is_some() {
             return;
@@ -853,8 +1334,40 @@ impl Studio {
         if pressed(Key::G, Modifiers::CTRL) {
             self.open_navigator(false);
         }
+        if pressed(Key::P, Modifiers::CTRL | Modifiers::SHIFT) {
+            self.palette = match self.palette.is_some() {
+                true => None,
+                false => Some((String::new(), 0)),
+            };
+        }
         if self.navigator.is_some() {
             return;
+        }
+        if self.palette.is_some() {
+            return;
+        }
+        // The completion popup consumes navigation keys before the editor does.
+        if self.completion.is_some() {
+            if pressed(Key::Escape, Modifiers::NONE) {
+                self.completion = None;
+            } else if pressed(Key::ArrowDown, Modifiers::NONE) {
+                if let Some(state) = &mut self.completion {
+                    state.selected = (state.selected + 1).min(state.items.len().saturating_sub(1));
+                }
+            } else if pressed(Key::ArrowUp, Modifiers::NONE) {
+                if let Some(state) = &mut self.completion {
+                    state.selected = state.selected.saturating_sub(1);
+                }
+            } else if pressed(Key::Enter, Modifiers::NONE) || pressed(Key::Tab, Modifiers::NONE) {
+                let selected = self.completion.as_ref().map_or(0, |state| state.selected);
+                self.accept_completion(ctx, selected);
+            }
+        }
+        if pressed(Key::Space, Modifiers::CTRL) {
+            self.open_completion(ctx);
+        }
+        if pressed(Key::F12, Modifiers::NONE) {
+            self.go_to_definition(ctx);
         }
         if pressed(Key::N, Modifiers::CTRL) {
             self.new_doc();
@@ -935,10 +1448,10 @@ impl Studio {
             }
         }
         let title = self.docs.get(self.active).map_or_else(
-            || "Aegis Studio".into(),
+            || "Sentinel".into(),
             |d| {
                 format!(
-                    "{}{} — Aegis Studio",
+                    "{}{} — Sentinel",
                     if d.dirty() { "• " } else { "" },
                     d.title()
                 )
@@ -950,8 +1463,13 @@ impl Studio {
             .show(ctx, |ui| {
                 ui.add_space(9.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("A E G I S").size(22.0).strong().color(ACCENT));
-                    ui.label(RichText::new("STUDIO").size(11.0).color(MUTED));
+                    ui.label(
+                        RichText::new("S E N T I N E L")
+                            .size(22.0)
+                            .strong()
+                            .color(ACCENT),
+                    );
+                    ui.label(RichText::new("AEGIS IDE").size(11.0).color(MUTED));
                     ui.separator();
                     if ui.button("New").on_hover_text("Ctrl+N").clicked() {
                         self.new_doc();
@@ -1016,14 +1534,7 @@ impl Studio {
                             ui.close();
                         }
                         if ui.button("Open project folder…").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                self.files = project_files(&path);
-                                let entry = path.join("main.ae");
-                                self.project_entry = entry
-                                    .is_file()
-                                    .then(|| entry.canonicalize().unwrap_or(entry));
-                                self.workspace = Some(path);
-                            }
+                            self.open_folder();
                             ui.close();
                         }
                         if ui.button("Close tab   Ctrl+W").clicked() {
@@ -1107,15 +1618,28 @@ impl Studio {
         self.sidebar(ctx);
         egui::TopBottomPanel::bottom("output").resizable(true).default_height(200.0).min_height(90.0).show(ctx,|ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("OUTPUT").small().strong().color(MUTED));
-                if ui.small_button("Clear").clicked() { self.output.clear(); }
-                if self.busy || self.analyzing { ui.spinner(); }
-                if self.output.len()>=OUTPUT_LIMIT { ui.label(RichText::new("Output limit reached (1 MiB)").small().color(Color32::YELLOW)); }
+                let problems = self.docs.iter().filter(|doc| doc.diagnostic.is_some()).count();
+                if ui.selectable_label(self.bottom_tab == BottomTab::Output, RichText::new("OUTPUT").small().strong().color(MUTED)).clicked() {
+                    self.bottom_tab = BottomTab::Output;
+                }
+                if ui.selectable_label(self.bottom_tab == BottomTab::Problems, RichText::new(format!("PROBLEMS ({problems})")).small().strong().color(if problems == 0 { MUTED } else { Color32::from_rgb(249, 131, 142) })).clicked() {
+                    self.bottom_tab = BottomTab::Problems;
+                }
+                if self.bottom_tab == BottomTab::Output {
+                    if ui.small_button("Clear").clicked() { self.output.clear(); }
+                    if self.busy || self.analyzing { ui.spinner(); }
+                    if self.output.len()>=OUTPUT_LIMIT { ui.label(RichText::new("Output limit reached (1 MiB)").small().color(Color32::YELLOW)); }
+                }
             });
-            egui::ScrollArea::both().stick_to_bottom(true).show(ui,|ui| {
-                if self.output.is_empty() { ui.label(RichText::new("Build and run output appears here. Source is compiled directly to native machine code.").color(MUTED)); }
-                else { ui.add(egui::Label::new(RichText::new(String::from_utf8_lossy(&self.output)).monospace()).selectable(true)); }
-            });
+            match self.bottom_tab {
+                BottomTab::Output => {
+                    egui::ScrollArea::both().stick_to_bottom(true).show(ui,|ui| {
+                        if self.output.is_empty() { ui.label(RichText::new("Build and run output appears here. Source is compiled directly to native machine code.").color(MUTED)); }
+                        else { ui.add(egui::Label::new(RichText::new(String::from_utf8_lossy(&self.output)).monospace()).selectable(true)); }
+                    });
+                }
+                BottomTab::Problems => self.problems_panel(ui),
+            }
         });
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).fill(Color32::from_rgb(14, 19, 27)))
@@ -1165,6 +1689,7 @@ impl Studio {
             self.inspector = None;
         }
         self.navigation_modal(ctx);
+        self.palette_modal(ctx);
         if self.busy
             || self.inspecting
             || self.analyzing
@@ -1188,11 +1713,12 @@ impl Studio {
                 if ui.button("Find file").on_hover_text("Ctrl+P").clicked() { self.open_navigator(true); }
             });
             let mut open=None;
-            egui::ScrollArea::vertical().max_height(220.0).show(ui,|ui| {
-                for path in &self.files {
-                    let title=path.strip_prefix(self.workspace.as_deref().unwrap_or(Path::new(""))).unwrap_or(path).display().to_string();
-                    if ui.button(title).clicked() { open=Some(path.clone()); }
-                }
+            egui::ScrollArea::vertical().max_height(260.0).show(ui,|ui| {
+                let tree = navigation::build_tree(
+                    self.workspace.as_deref().unwrap_or(Path::new("")),
+                    &self.files,
+                );
+                Self::tree_nodes(ui, &tree, &mut open);
             });
             if let Some(path)=open { self.open_path(path); }
             ui.add_space(18.0); ui.separator(); ui.add_space(8.0);
@@ -1213,7 +1739,7 @@ impl Studio {
             });
             if let Some((path, offset)) = location { self.open_location(path, offset); }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT),|ui| {
-                ui.label(RichText::new(concat!("AEGIS ", env!("CARGO_PKG_VERSION"), "\nNative compiler + editor\n\nCtrl+P  Find file\nCtrl+G  Go to line\nCtrl+F  Find\nCtrl+S  Save\nF6  Build\nF5  Build and run")).small().color(MUTED));
+                ui.label(RichText::new(concat!("Sentinel ", env!("CARGO_PKG_VERSION"), " — Aegis IDE\nNative compiler + editor\n\nCtrl+Shift+P  Command palette\nCtrl+P  Find file\nCtrl+G  Go to line\nCtrl+F  Find\nCtrl+S  Save\nF6  Build\nF5  Build and run\nF12  Go to definition\nCtrl+Space  Completions")).small().color(MUTED));
             });
         });
     }
@@ -1381,6 +1907,10 @@ impl Studio {
         ui.separator();
     }
     fn editor(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let completion_state = self.completion.clone();
+        let mut completion_replace: Option<Option<CompletionState>> = None;
+        let mut accept: Option<usize> = None;
         let Some(doc) = self.docs.get_mut(self.active) else {
             return;
         };
@@ -1427,6 +1957,15 @@ impl Studio {
                         .show(ui);
                     if output.response.changed() {
                         doc.changed();
+                        let byte_at = Self::caret_byte_offset(
+                            &doc.text,
+                            output.cursor_range.map_or(0, |range| range.primary.index),
+                        );
+                        completion_replace = Some(Self::fresh_completion(
+                            &doc.text,
+                            doc.functions.as_slice(),
+                            byte_at,
+                        ));
                     }
                     if let Some(range) = output.cursor_range {
                         doc.cursor = doc.text.chars().take(range.primary.index).fold(
@@ -1452,8 +1991,49 @@ impl Studio {
                             Some(egui::Align::Center),
                         );
                     }
+                    let shown = completion_replace
+                        .as_ref()
+                        .and_then(|inner| inner.as_ref())
+                        .or(completion_state.as_ref());
+                    if let Some(state) = shown
+                        && !state.items.is_empty()
+                    {
+                        let row_height = ui.fonts_mut(|f| f.row_height(&FontId::monospace(15.0)));
+                        let y = (output.response.rect.top() + doc.cursor.0 as f32 * row_height)
+                            .min(output.response.rect.bottom() - 8.0);
+                        egui::Area::new(Id::new("completion-popup"))
+                            .fixed_pos(egui::pos2(output.response.rect.left() + 28.0, y))
+                            .order(egui::Order::Foreground)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                    for (index, item) in state.items.iter().enumerate() {
+                                        let kind = match item.kind {
+                                            completion::Kind::Keyword => "kw",
+                                            completion::Kind::Type => "type",
+                                            completion::Kind::Function => "fn",
+                                            completion::Kind::Buffer => "var",
+                                        };
+                                        let row = ui.selectable_label(
+                                            index == state.selected,
+                                            RichText::new(format!("{kind}  {}", item.label))
+                                                .monospace()
+                                                .size(13.0),
+                                        );
+                                        if row.clicked() {
+                                            accept = Some(index);
+                                        }
+                                    }
+                                });
+                            });
+                    }
                 });
             });
+        if let Some(replace) = completion_replace {
+            self.completion = replace;
+        }
+        if let Some(index) = accept {
+            self.accept_completion(&ctx, index);
+        }
     }
     fn close_modal(&mut self, ctx: &egui::Context) {
         let Some(id) = self.close_doc else {
@@ -1722,7 +2302,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Aegis Studio",
+        "Sentinel",
         options,
         Box::new(|cc| Ok(Box::new(Studio::new(cc)))),
     )
@@ -1731,6 +2311,37 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn analysis_error_is_routed_to_its_own_document() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let entry = dir.path().join("main.ae");
+        let child = dir.path().join("helper.ae");
+        std::fs::write(&entry, "mod helper; fn main() {}").expect("entry");
+        std::fs::write(&child, "fn value() { return missing; }").expect("child");
+        let mut app = Studio::default();
+        app.open_path(entry);
+        app.open_path(child.clone());
+        // Studio::default() already carries the untitled sample buffer.
+        assert_eq!(app.docs.len(), 3);
+        // open_path canonicalizes; project diagnostics use canonical paths too.
+        let error = Diagnostic {
+            message: "unknown name `missing`".into(),
+            path: Some(child.canonicalize().expect("canonical")),
+            span: 0..1,
+            line: 1,
+            column: 1,
+        };
+        app.apply_analysis(1, 0, Err(error));
+        assert!(app.docs[0].diagnostic.is_none(), "sample stays clean");
+        assert!(app.docs[1].diagnostic.is_none(), "entry stays clean");
+        let routed = app.docs[2]
+            .diagnostic
+            .as_ref()
+            .expect("routed to helper.ae");
+        assert_eq!(routed.message, "unknown name `missing`");
+        app.apply_analysis(1, 0, Ok(Vec::new()));
+        assert!(app.docs.iter().all(|doc| doc.diagnostic.is_none()));
+    }
     #[test]
     fn keyboard_navigation_opens_selected_file_and_jumps() {
         let dir = tempfile::tempdir().expect("temp directory");

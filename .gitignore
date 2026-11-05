@@ -1,22 +1,16 @@
 *.exe
 *.tmp
 __pycache__/
-/key.bin
-/t3key.bin
+/dist/
 /target/
-/artifacts/
+/language/target/
+/ide/target/
+/LAUN-OTHER/
+/.zcode/
+/SHA256SUMS.txt
 /.env
 /.env.*
 *.key
 *.pem
 *.pfx
 *.p12
-# Original local samples and protected files are not project sources.
-/h.ae
-/henc.aeg
-/t3.ae
-/t3out.aeg
-/t3rest.ae
-
-# User-provided reference trees; keep out of the repository
-/LAUN-OTHER/

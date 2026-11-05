@@ -33,11 +33,11 @@ jobs:
         shell: pwsh
         run: |
           $lines = @(
-            "{0}  aegis.exe" -f (Get-FileHash aegis.exe -Algorithm SHA256).Hash,
-            "{0}  aegis-cli.exe" -f (Get-FileHash aegis-cli.exe -Algorithm SHA256).Hash,
-            "{0}  THIRD_PARTY_NOTICES.txt" -f (Get-FileHash THIRD_PARTY_NOTICES.txt -Algorithm SHA256).Hash
+            "{0}  sentinel.exe" -f (Get-FileHash dist/sentinel.exe -Algorithm SHA256).Hash,
+            "{0}  aegis-cli.exe" -f (Get-FileHash dist/aegis-cli.exe -Algorithm SHA256).Hash,
+            "{0}  THIRD_PARTY_NOTICES.txt" -f (Get-FileHash dist/THIRD_PARTY_NOTICES.txt -Algorithm SHA256).Hash
           )
-          Set-Content SHA256SUMS.txt -Value $lines -Encoding ascii
+          Set-Content dist/SHA256SUMS.txt -Value $lines -Encoding ascii
       - name: Publish GitHub release
         shell: pwsh
         env:
@@ -46,12 +46,12 @@ jobs:
           $tag = "${{ github.ref_name }}"
           gh release view $tag --repo "${{ github.repository }}" *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag aegis.exe aegis-cli.exe SHA256SUMS.txt THIRD_PARTY_NOTICES.txt `
+            gh release create $tag dist/sentinel.exe dist/aegis-cli.exe dist/SHA256SUMS.txt dist/THIRD_PARTY_NOTICES.txt `
               --repo "${{ github.repository }}" `
               --title "Aegis $tag" `
               --generate-notes `
               --prerelease
           } else {
-            gh release upload $tag aegis.exe aegis-cli.exe SHA256SUMS.txt THIRD_PARTY_NOTICES.txt `
+            gh release upload $tag dist/sentinel.exe dist/aegis-cli.exe dist/SHA256SUMS.txt dist/THIRD_PARTY_NOTICES.txt `
               --repo "${{ github.repository }}" --clobber
           }
