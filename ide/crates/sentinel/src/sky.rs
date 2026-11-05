@@ -76,7 +76,7 @@ impl SkyField {
                     self.texture = Some(handle);
                 }
             }
-            self.redraw_in = 1.0 / 30.0;
+            self.redraw_in = 1.0 / 60.0;
         }
         let painter = ui.painter();
         painter.rect_filled(rect, 0.0, SKY_BOTTOM);
@@ -93,88 +93,129 @@ impl SkyField {
     }
 }
 
-/// Exact port of the pattern fragment shader main().
+/// Exact port of the pattern fragment shader main(), evaluated in parallel
+/// across all cores so the texture can refresh at 60 fps.
 fn render(width: usize, height: usize, rect: Rect, elapsed: [f64; 3]) -> ColorImage {
     let loops = loop_uniforms(elapsed);
-    let resolution = (
-        f64::from(rect.width().max(1.0)),
-        f64::from(rect.height().max(1.0)),
-    );
     let rotation = ROTATION * std::f64::consts::FRAC_PI_2;
-    let (rot_cos, rot_sin) = (rotation.cos(), rotation.sin());
-    let mut pixels = Vec::with_capacity(width * height);
-    for y in 0..height {
-        for x in 0..width {
-            // gl_FragCoord origin is bottom-left; egui images are top-down.
-            let mut uv = (
-                (x as f64 + 0.5) / width as f64,
-                1.0 - (y as f64 + 0.5) / height as f64,
-            );
-            uv.0 -= 0.5;
-            uv.1 -= 0.5;
-            uv.0 *= NOISE_SCALE * resolution.0;
-            uv.1 *= NOISE_SCALE * resolution.1;
-            let rotated = (
-                rot_cos * uv.0 - rot_sin * uv.1,
-                rot_sin * uv.0 + rot_cos * uv.1,
-            );
-            uv = (rotated.0 + 0.5 + OFFSET.0, rotated.1 + 0.5 + OFFSET.1);
-
-            let n1 = noise(uv.0 + loops[0].0, uv.1 + loops[0].1);
-            let n2 = noise(uv.0 * 2.0 - loops[1].0, uv.1 * 2.0 - loops[1].1);
-            let angle = n1 * std::f64::consts::TAU;
-            uv.0 += 4.0 * DISTORTION * n2 * angle.cos();
-            uv.1 += 4.0 * DISTORTION * n2 * angle.sin();
-            for i in 1..=SWIRL_ITERATIONS {
-                let i = f64::from(i);
-                let weight = SWIRL / i;
-                uv.0 += weight
-                    * (loops[2].1 * (i * 1.5 * uv.1).cos() - loops[2].0 * (i * 1.5 * uv.1).sin());
-                uv.1 += weight * (loops[2].1 * (i * uv.0).cos() - loops[2].0 * (i * uv.0).sin());
-            }
-
-            let shape_uv = (
-                uv.0 * (0.5 + 3.5 * SHAPE_SCALE),
-                uv.1 * (0.5 + 3.5 * SHAPE_SCALE),
-            );
-            let shape = 0.5 + 0.5 * shape_uv.0.sin() * shape_uv.1.cos();
-            // proportion is exactly 0.5 on the homepage, so the correction
-            // term `0.48 * sign(0) * sqrt(0)` is zero.
-            let mixer = shape;
-
-            // blend_multi with colorCount=3 and softness=1 (edge=0).
-            let mut col = COLOR1;
-            let r1 = smoothstep(0.0, 0.7, mixer as f32);
-            col[0] = col[0] + (WHITE[0] - col[0]) * r1;
-            col[1] = col[1] + (WHITE[1] - col[1]) * r1;
-            col[2] = col[2] + (WHITE[2] - col[2]) * r1;
-            let r2 = smoothstep(0.3, 1.0, mixer as f32);
-            col[0] = col[0] + (WHITE[0] - col[0]) * r2;
-            col[1] = col[1] + (WHITE[1] - col[1]) * r2;
-            col[2] = col[2] + (WHITE[2] - col[2]) * r2;
-
-            // The CSS mask over the whole layer: #000000fc 0%,
-            // #000000e8 8.98%, transparent 100% — piecewise linear alpha.
-            let t = y as f64 / height.max(1) as f64;
-            let mask = if t <= 0.0898 {
-                0.988 + (0.910 - 0.988) * (t / 0.0898)
-            } else {
-                0.910 * (1.0 - (t - 0.0898) / (1.0 - 0.0898))
-            };
-            let mask = mask.clamp(0.0, 1.0) as f32;
-            pixels.push(Color32::from_rgba_unmultiplied(
-                (col[0] * 255.0).round() as u8,
-                (col[1] * 255.0).round() as u8,
-                (col[2] * 255.0).round() as u8,
-                (mask * 255.0).round() as u8,
-            ));
+    let context = SkyContext {
+        width,
+        height,
+        resolution: (
+            f64::from(rect.width().max(1.0)),
+            f64::from(rect.height().max(1.0)),
+        ),
+        rot_cos: rotation.cos(),
+        rot_sin: rotation.sin(),
+        loops: &loops,
+    };
+    let mut pixels = vec![Color32::TRANSPARENT; width * height];
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(height.max(1));
+    let rows = height.div_ceil(threads);
+    // Disjoint row chunks, one per thread.
+    let chunks: Vec<&mut [Color32]> = pixels.chunks_mut(rows * width).collect();
+    let context = &context;
+    std::thread::scope(|scope| {
+        for (chunk_index, slice) in chunks.into_iter().enumerate() {
+            let y0 = chunk_index * rows;
+            let y1 = (y0 + rows).min(height);
+            scope.spawn(move || {
+                for (row, y) in (y0..y1).enumerate() {
+                    for x in 0..width {
+                        slice[row * width + x] = shade(x, y, context);
+                    }
+                }
+            });
         }
-    }
+    });
     ColorImage {
         size: [width, height],
         source_size: Vec2::new(width as f32, height as f32),
         pixels,
     }
+}
+
+/// Shared per-frame uniforms for the pattern evaluation.
+struct SkyContext<'a> {
+    width: usize,
+    height: usize,
+    resolution: (f64, f64),
+    rot_cos: f64,
+    rot_sin: f64,
+    loops: &'a [(f64, f64); 3],
+}
+
+/// One fragment of the pattern shader: uv setup, distortion, swirl and the
+/// checks mixer, exactly as in module 87799 of the deepseek.com bundle.
+fn shade(x: usize, y: usize, sky: &SkyContext<'_>) -> Color32 {
+    let width = sky.width;
+    let height = sky.height;
+    // gl_FragCoord origin is bottom-left; egui images are top-down.
+    let mut uv = (
+        (x as f64 + 0.5) / width as f64,
+        1.0 - (y as f64 + 0.5) / height as f64,
+    );
+    uv.0 -= 0.5;
+    uv.1 -= 0.5;
+    uv.0 *= NOISE_SCALE * sky.resolution.0;
+    uv.1 *= NOISE_SCALE * sky.resolution.1;
+    let rotated = (
+        sky.rot_cos * uv.0 - sky.rot_sin * uv.1,
+        sky.rot_sin * uv.0 + sky.rot_cos * uv.1,
+    );
+    uv = (rotated.0 + 0.5 + OFFSET.0, rotated.1 + 0.5 + OFFSET.1);
+
+    let n1 = noise(uv.0 + sky.loops[0].0, uv.1 + sky.loops[0].1);
+    let n2 = noise(uv.0 * 2.0 - sky.loops[1].0, uv.1 * 2.0 - sky.loops[1].1);
+    let angle = n1 * std::f64::consts::TAU;
+    uv.0 += 4.0 * DISTORTION * n2 * angle.cos();
+    uv.1 += 4.0 * DISTORTION * n2 * angle.sin();
+    for i in 1..=SWIRL_ITERATIONS {
+        let i = f64::from(i);
+        let weight = SWIRL / i;
+        uv.0 += weight
+            * (sky.loops[2].1 * (i * 1.5 * uv.1).cos() - sky.loops[2].0 * (i * 1.5 * uv.1).sin());
+        uv.1 += weight * (sky.loops[2].1 * (i * uv.0).cos() - sky.loops[2].0 * (i * uv.0).sin());
+    }
+
+    let shape_uv = (
+        uv.0 * (0.5 + 3.5 * SHAPE_SCALE),
+        uv.1 * (0.5 + 3.5 * SHAPE_SCALE),
+    );
+    let shape = 0.5 + 0.5 * shape_uv.0.sin() * shape_uv.1.cos();
+    // proportion is exactly 0.5 on the homepage, so the correction
+    // term `0.48 * sign(0) * sqrt(0)` is zero.
+    let mixer = shape;
+
+    // blend_multi with colorCount=3 and softness=1 (edge=0).
+    let mut col = COLOR1;
+    let r1 = smoothstep(0.0, 0.7, mixer as f32);
+    col[0] = col[0] + (WHITE[0] - col[0]) * r1;
+    col[1] = col[1] + (WHITE[1] - col[1]) * r1;
+    col[2] = col[2] + (WHITE[2] - col[2]) * r1;
+    let r2 = smoothstep(0.3, 1.0, mixer as f32);
+    col[0] = col[0] + (WHITE[0] - col[0]) * r2;
+    col[1] = col[1] + (WHITE[1] - col[1]) * r2;
+    col[2] = col[2] + (WHITE[2] - col[2]) * r2;
+
+    // The CSS mask over the whole layer: #000000fc 0%,
+    // #000000e8 8.98%, transparent 100% — piecewise linear alpha.
+    let t = y as f64 / height.max(1) as f64;
+    let mask = if t <= 0.0898 {
+        0.988 + (0.910 - 0.988) * (t / 0.0898)
+    } else {
+        0.910 * (1.0 - (t - 0.0898) / (1.0 - 0.0898))
+    };
+    let mask = mask.clamp(0.0, 1.0) as f32;
+    Color32::from_rgba_unmultiplied(
+        (col[0] * 255.0).round() as u8,
+        (col[1] * 255.0).round() as u8,
+        (col[2] * 255.0).round() as u8,
+        (mask * 255.0).round() as u8,
+    )
 }
 
 /// Module 46984 loop uniforms for the pattern branch.
