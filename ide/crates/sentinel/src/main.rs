@@ -28,6 +28,9 @@ struct App {
     /// Cursor offset from the window origin captured when the titlebar drag
     /// starts; the window follows the pointer keeping this offset constant.
     grab: Option<Vec2>,
+    /// A maximized window is being restored so the drag can continue, like
+    /// the native Windows titlebar does.
+    restore_pending: bool,
 }
 
 impl eframe::App for App {
@@ -48,6 +51,7 @@ impl eframe::App for App {
         // system may move the window (maximize, restore, snap). During a drag
         // this sync is skipped — our tracked position is the source of truth.
         if self.grab.is_none()
+            && !self.restore_pending
             && let Some(outer) = ctx.input(|i| i.viewport().outer_rect)
         {
             self.window_pos = Some(outer.min);
@@ -78,28 +82,48 @@ impl eframe::App for App {
                     egui::Id::new("titlebar-drag"),
                     egui::Sense::click_and_drag(),
                 );
+                let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 if drag.double_clicked() {
-                    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                     self.grab = None;
                 } else if drag.drag_started() {
-                    // Remember where the cursor grabbed the window.
-                    self.grab = match (drag.interact_pointer_pos(), self.window_pos) {
-                        (Some(pointer), Some(pos)) => Some(pointer - pos),
-                        _ => None,
-                    };
+                    if maximized {
+                        // A maximized window cannot be dragged: restore it
+                        // first, like the native titlebar does, then continue
+                        // the drag once the restored geometry is known.
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                        self.restore_pending = true;
+                        self.grab = None;
+                    } else if let Some(pointer) = drag.interact_pointer_pos() {
+                        self.grab = Some(pointer - self.window_pos.unwrap_or(pointer));
+                    }
                 } else if drag.drag_stopped() {
                     self.grab = None;
-                } else if drag.dragged()
-                    && let Some(grab) = self.grab
-                    && let Some(pointer) = drag.interact_pointer_pos()
-                    && let Some(pos) = &mut self.window_pos
-                {
-                    // The cursor keeps its grab point: window = pointer - grab.
-                    // No system feedback here — the tracked position cannot
-                    // lag, so dragging is perfectly smooth.
-                    *pos = pointer - grab;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(*pos));
+                    self.restore_pending = false;
+                } else if drag.dragged() {
+                    if self.restore_pending
+                        && !maximized
+                        && let Some(outer) = ctx.input(|i| i.viewport().outer_rect)
+                        && let Some(pointer) = drag.interact_pointer_pos()
+                    {
+                        // Drop the restored window under the cursor, bar
+                        // centered, and keep dragging.
+                        let grab = egui::vec2(outer.size().x * 0.5, 18.0);
+                        let placed = pointer - grab;
+                        self.window_pos = Some(placed);
+                        self.grab = Some(grab);
+                        self.restore_pending = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(placed));
+                    } else if let Some(grab) = self.grab
+                        && let Some(pointer) = drag.interact_pointer_pos()
+                        && let Some(pos) = &mut self.window_pos
+                    {
+                        // The cursor keeps its grab point: window = pointer -
+                        // grab. No system feedback — the tracked position
+                        // cannot lag, so dragging is perfectly smooth.
+                        *pos = pointer - grab;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(*pos));
+                    }
                 }
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 if window_button(
@@ -206,6 +230,7 @@ fn main() -> eframe::Result {
                 windows_icons,
                 window_pos: None,
                 grab: None,
+                restore_pending: false,
             }))
         }),
     )
