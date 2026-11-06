@@ -46,9 +46,45 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 let full = ui.max_rect();
                 self.sky.paint(ui, full);
+                // Left field: an empty glass panel from the bottom edge up to
+                // the titlebar, styled like the DeepSeek ds-header-bar glass
+                // (white .45 fill, fake 12px backdrop blur, hairline border).
+                const BAR_HEIGHT: f32 = 36.0;
+                const FIELD_WIDTH: f32 = 232.0;
+                let field = egui::Rect::from_min_max(
+                    egui::pos2(full.left(), full.top() + BAR_HEIGHT),
+                    egui::pos2(full.left() + FIELD_WIDTH, full.bottom()),
+                );
+                let painter = ui.painter();
+                // Fake the 12px backdrop blur: a soft white wash bleeding out
+                // from under the glass.
+                painter.rect_filled(
+                    field.expand(8.0),
+                    20.0,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 70),
+                );
+                painter.rect_filled(
+                    field,
+                    egui::CornerRadius {
+                        nw: 0,
+                        ne: 14,
+                        sw: 0,
+                        se: 14,
+                    },
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 115),
+                );
+                // Hairline border, their rgba(0,0,0,.1): right edge only —
+                // the other sides are flush with the window.
+                painter.line_segment(
+                    [
+                        egui::pos2(field.right(), field.top()),
+                        egui::pos2(field.right(), field.bottom()),
+                    ],
+                    egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 26)),
+                );
                 // Minimal custom titlebar: drag strip + the three standard
                 // window buttons. Nothing else lives here.
-                let bar = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), 36.0));
+                let bar = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), BAR_HEIGHT));
                 let button_size = egui::vec2(44.0, bar.height());
                 let close_rect =
                     egui::Rect::from_min_size(bar.right_top() - egui::vec2(44.0, 0.0), button_size);
