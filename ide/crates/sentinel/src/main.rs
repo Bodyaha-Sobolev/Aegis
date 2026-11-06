@@ -21,11 +21,13 @@ struct App {
     allow_exit: bool,
     /// True when the Windows caption icon font was found and registered.
     windows_icons: bool,
+    /// Authoritative window position (points), maintained by us. The system
+    /// position lags behind our OuterPosition commands, so during a drag it
+    /// is never read back — this value is the single source of truth.
+    window_pos: Option<egui::Pos2>,
     /// Cursor offset from the window origin captured when the titlebar drag
-    /// starts. The window follows the cursor every frame by repositioning so
-    /// that this offset stays constant — self-correcting, no accumulation,
-    /// unlike the native modal move loop which froze rendering.
-    grab_offset: Option<Vec2>,
+    /// starts; the window follows the pointer keeping this offset constant.
+    grab: Option<Vec2>,
 }
 
 impl eframe::App for App {
@@ -41,6 +43,14 @@ impl eframe::App for App {
                 self.allow_exit = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+        }
+        // Keep our own window-position bookkeeping in sync while idle: the
+        // system may move the window (maximize, restore, snap). During a drag
+        // this sync is skipped — our tracked position is the source of truth.
+        if self.grab.is_none()
+            && let Some(outer) = ctx.input(|i| i.viewport().outer_rect)
+        {
+            self.window_pos = Some(outer.min);
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -71,29 +81,25 @@ impl eframe::App for App {
                 if drag.double_clicked() {
                     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                    self.grab_offset = None;
+                    self.grab = None;
                 } else if drag.drag_started() {
                     // Remember where the cursor grabbed the window.
-                    self.grab_offset = match (
-                        drag.interact_pointer_pos(),
-                        ctx.input(|i| i.viewport().outer_rect),
-                    ) {
-                        (Some(pointer), Some(outer)) => Some(pointer - outer.min),
+                    self.grab = match (drag.interact_pointer_pos(), self.window_pos) {
+                        (Some(pointer), Some(pos)) => Some(pointer - pos),
                         _ => None,
                     };
                 } else if drag.drag_stopped() {
-                    self.grab_offset = None;
+                    self.grab = None;
                 } else if drag.dragged()
-                    && let Some(offset) = self.grab_offset
+                    && let Some(grab) = self.grab
                     && let Some(pointer) = drag.interact_pointer_pos()
-                    && let Some(outer) = ctx.input(|i| i.viewport().outer_rect)
+                    && let Some(pos) = &mut self.window_pos
                 {
-                    // Keep the cursor at the same point of the window: place
-                    // the window so that (pointer - outer.min) equals the
-                    // grab offset. Self-correcting every frame — the render
-                    // loop keeps running while dragging.
-                    let target = outer.min + (pointer - offset).to_vec2();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target));
+                    // The cursor keeps its grab point: window = pointer - grab.
+                    // No system feedback here — the tracked position cannot
+                    // lag, so dragging is perfectly smooth.
+                    *pos = pointer - grab;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(*pos));
                 }
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 if window_button(
@@ -198,7 +204,8 @@ fn main() -> eframe::Result {
                 screenshot,
                 allow_exit: false,
                 windows_icons,
-                grab_offset: None,
+                window_pos: None,
+                grab: None,
             }))
         }),
     )
