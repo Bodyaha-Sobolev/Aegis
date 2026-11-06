@@ -10,9 +10,10 @@
 
 mod sky;
 
-use eframe::egui::{self, Color32, Key, Vec2};
+use eframe::egui::{self, Color32, Key};
 use sky::SkyField;
 use std::path::PathBuf;
+use std::sync::{Arc, atomic::AtomicBool};
 
 struct App {
     sky: SkyField,
@@ -21,16 +22,9 @@ struct App {
     allow_exit: bool,
     /// True when the Windows caption icon font was found and registered.
     windows_icons: bool,
-    /// Authoritative window position (points), maintained by us. The system
-    /// position lags behind our OuterPosition commands, so during a drag it
-    /// is never read back — this value is the single source of truth.
-    window_pos: Option<egui::Pos2>,
-    /// Cursor offset from the window origin captured when the titlebar drag
-    /// starts; the window follows the pointer keeping this offset constant.
-    grab: Option<Vec2>,
-    /// A maximized window is being restored so the drag can continue, like
-    /// the native Windows titlebar does.
-    restore_pending: bool,
+    /// Set while the native modal drag runs: a helper thread keeps poking
+    /// repaints so the background keeps animating during the move.
+    drag_active: Arc<AtomicBool>,
 }
 
 impl eframe::App for App {
@@ -46,15 +40,6 @@ impl eframe::App for App {
                 self.allow_exit = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-        }
-        // Keep our own window-position bookkeeping in sync while idle: the
-        // system may move the window (maximize, restore, snap). During a drag
-        // this sync is skipped — our tracked position is the source of truth.
-        if self.grab.is_none()
-            && !self.restore_pending
-            && let Some(outer) = ctx.input(|i| i.viewport().outer_rect)
-        {
-            self.window_pos = Some(outer.min);
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -85,47 +70,17 @@ impl eframe::App for App {
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 if drag.double_clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                    self.grab = None;
                 } else if drag.drag_started() {
-                    if maximized {
-                        // A maximized window cannot be dragged: restore it
-                        // first, like the native titlebar does, then continue
-                        // the drag once the restored geometry is known.
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-                        self.restore_pending = true;
-                        self.grab = None;
-                    } else if let Some(pointer) = drag.interact_pointer_pos() {
-                        self.grab = Some(pointer - self.window_pos.unwrap_or(pointer));
-                    }
-                } else if drag.drag_stopped() {
-                    self.grab = None;
-                    self.restore_pending = false;
-                } else if drag.dragged() {
-                    if self.restore_pending
-                        && !maximized
-                        && let Some(outer) = ctx.input(|i| i.viewport().outer_rect)
-                        && let Some(pointer) = drag.interact_pointer_pos()
-                    {
-                        // Drop the restored window under the cursor, bar
-                        // centered, and keep dragging.
-                        let grab = egui::vec2(outer.size().x * 0.5, 18.0);
-                        let placed = pointer - grab;
-                        self.window_pos = Some(placed);
-                        self.grab = Some(grab);
-                        self.restore_pending = false;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(placed));
-                    } else if let Some(grab) = self.grab
-                        && let Some(pointer) = drag.interact_pointer_pos()
-                        && let Some(pos) = &mut self.window_pos
-                    {
-                        // The cursor keeps its grab point: window = pointer -
-                        // grab. No system feedback — the tracked position
-                        // cannot lag, so dragging is perfectly smooth.
-                        *pos = pointer - grab;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(*pos));
-                    }
+                    // Native modal drag: Windows moves the window (and
+                    // un-maximizes a maximized one) perfectly smoothly. A
+                    // helper thread pokes repaints so the background keeps
+                    // animating while the modal loop runs.
+                    self.drag_active
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    self.drag_active
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                 }
-                let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 if window_button(
                     ui,
                     minimize_rect,
@@ -188,6 +143,7 @@ fn main() -> eframe::Result {
         .nth(1)
         .map(PathBuf::from)
         .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+    let drag_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             // No native bar: the custom bar over the background handles
@@ -201,6 +157,18 @@ fn main() -> eframe::Result {
         "Sentinel",
         options,
         Box::new(move |cc| {
+            // While the native modal drag runs, this thread keeps poking
+            // repaints so the background keeps animating during the move.
+            let poke_ctx = cc.egui_ctx.clone();
+            let poke_flag = drag_active.clone();
+            std::thread::spawn(move || {
+                loop {
+                    if poke_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        poke_ctx.request_repaint();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(8));
+                }
+            });
             // Use the very glyph font Windows draws its own caption buttons
             // with: Segoe Fluent Icons (Win11) / Segoe MDL2 Assets (Win10).
             let mut fonts = egui::FontDefinitions::default();
@@ -228,9 +196,7 @@ fn main() -> eframe::Result {
                 screenshot,
                 allow_exit: false,
                 windows_icons,
-                window_pos: None,
-                grab: None,
-                restore_pending: false,
+                drag_active: drag_active.clone(),
             }))
         }),
     )
