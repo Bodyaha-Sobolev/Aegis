@@ -21,10 +21,11 @@ struct App {
     allow_exit: bool,
     /// True when the Windows caption icon font was found and registered.
     windows_icons: bool,
-    /// Current window position while the titlebar drag is active. The window
-    /// follows the cursor every frame instead of entering the native modal
-    /// move loop, which froze rendering and made dragging choppy.
-    drag_origin: Option<egui::Pos2>,
+    /// Cursor offset from the window origin captured when the titlebar drag
+    /// starts. The window follows the cursor every frame by repositioning so
+    /// that this offset stays constant — self-correcting, no accumulation,
+    /// unlike the native modal move loop which froze rendering.
+    grab_offset: Option<Vec2>,
 }
 
 impl eframe::App for App {
@@ -70,23 +71,29 @@ impl eframe::App for App {
                 if drag.double_clicked() {
                     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                    self.drag_origin = None;
+                    self.grab_offset = None;
                 } else if drag.drag_started() {
-                    self.drag_origin = ctx.input(|i| i.viewport().outer_rect.map(|rect| rect.min));
+                    // Remember where the cursor grabbed the window.
+                    self.grab_offset = match (
+                        drag.interact_pointer_pos(),
+                        ctx.input(|i| i.viewport().outer_rect),
+                    ) {
+                        (Some(pointer), Some(outer)) => Some(pointer - outer.min),
+                        _ => None,
+                    };
                 } else if drag.drag_stopped() {
-                    self.drag_origin = None;
+                    self.grab_offset = None;
                 } else if drag.dragged()
-                    && let Some(origin) = &mut self.drag_origin
+                    && let Some(offset) = self.grab_offset
+                    && let Some(pointer) = drag.interact_pointer_pos()
+                    && let Some(outer) = ctx.input(|i| i.viewport().outer_rect)
                 {
-                    // Move the window with the pointer every frame; the render
-                    // loop keeps running, so dragging stays as smooth as the
-                    // animation itself.
-                    let delta = drag.drag_delta();
-                    if delta != Vec2::ZERO {
-                        origin.x += delta.x;
-                        origin.y += delta.y;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(*origin));
-                    }
+                    // Keep the cursor at the same point of the window: place
+                    // the window so that (pointer - outer.min) equals the
+                    // grab offset. Self-correcting every frame — the render
+                    // loop keeps running while dragging.
+                    let target = outer.min + (pointer - offset).to_vec2();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target));
                 }
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 if window_button(
@@ -191,7 +198,7 @@ fn main() -> eframe::Result {
                 screenshot,
                 allow_exit: false,
                 windows_icons,
-                drag_origin: None,
+                grab_offset: None,
             }))
         }),
     )
